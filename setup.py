@@ -92,6 +92,8 @@ setup(
             "fanpy_make_script=fanpy.scripts.make_script:main",
             "fanpy_run_calc=fanpy.scripts.run_calc:main",
             "fanpy_make_fanci_script=fanpy.scripts.make_fanci_script:main",
+            "fanpy_make_pyscf_script=fanpy.scripts.pyscf.make_script:main",
+            "fanpy_make_fanci_pyscf_script=fanpy.scripts.pyscf.make_fanci_script:main",
         ]
     },
     # List additional URLs that are relevant to your project as a dict.
