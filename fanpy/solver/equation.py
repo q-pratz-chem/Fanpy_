@@ -3,6 +3,7 @@
 from fanpy.eqn.base import BaseSchrodinger
 from fanpy.eqn.energy_oneside import EnergyOneSideProjection
 from fanpy.eqn.energy_twoside import EnergyTwoSideProjection
+from fanpy.eqn.energy_variational import EnergyVariational
 from fanpy.eqn.least_squares import LeastSquaresEquations
 from fanpy.solver.wrappers import wrap_scipy
 
@@ -194,3 +195,140 @@ def minimize(objective, use_gradient=True, **kwargs):
         output["energy"] = output["function"]
 
     return output
+
+
+def adam(objective, lr=0.001, betas=(0.9,0.99), max_iter=1000, **kwargs):
+    """Optimize the given objective using the Adam optimizer. (PyTorch).
+
+    Parameters
+    ----------
+    objective : BaseSchrodinger
+        Instance that contains the function that will be optimized.
+    lr : float
+        Learning rate.
+    max_iter : int
+        Maximum number of iterations.
+    kwargs : dict
+        Extra arguments (e.g., weight_decay, batch_size).
+
+    Returns
+    -------
+    dict
+        Results of the optimization in the same format as cma/minimize.
+    """
+    import torch
+    from torch.optim import Adam
+    from torch.optim.lr_scheduler import StepLR
+
+    seed = 12345
+    torch.manual_seed(seed)
+    torch.use_deterministic_algorithms(True)   # may slow things down
+    
+    tol_E = 1e-7 # tolerance for change in objective value
+    tol_grad = 1e-6 # tolerance for objective gradient norm
+    prev_energy = None
+    # original_lr = lr
+
+    if not isinstance(objective, BaseSchrodinger):
+        raise TypeError("Objective must be a BaseSchrodinger instance.")
+    if objective.num_eqns != 1:
+        raise ValueError("Objective must contain only one equation.")
+
+    # Disable hamiltonian updates (Adam is iterative)
+    objective.ham.update_prev_params = False
+    objective.step_print = False
+
+    # Convert parameters to PyTorch tensors
+    params = torch.tensor(
+        objective.wfn.params, requires_grad=True, dtype=torch.float64
+    )
+    optimizer = Adam(
+        [params],
+        lr=lr,
+        betas=betas,
+        # weight_decay=kwargs.get("weight_decay", 1e-4),
+    )
+    scheduler = StepLR(optimizer, step_size=1000, gamma=0.9)  # Reduce LR every 1000 steps by 10%
+
+    # Gradient clipping threshold
+    max_grad_norm = kwargs.get("max_grad_norm", 20.0)
+
+    def loss_fn():
+        # Convert params to numpy and evaluate Fanpy objective
+        params_np = params.detach().cpu().numpy() if isinstance(params, torch.Tensor) else np.array(params)
+        # if hasattr(objective.wfn, "normalize"):
+        #     objective.wfn.normalize(objective.pspace_l)
+        return objective.objective(params_np) #, normalize=True) #, assign=True)
+    
+    print('###\nPerforming Adam optimization with lr = {}, betas = {}, max_iter = {}'.format(lr, betas, max_iter))
+    print(f'Scheduler: Reducing LR every {scheduler.step_size} steps by {(1-scheduler.gamma)*100}%')
+    print('Initial parameters: {}'.format(params.detach().numpy()))
+    print('Initial loss: {}'.format(loss_fn()))
+    print('###')
+
+    for i in range(max_iter):
+        optimizer.zero_grad()
+
+        # Compute the loss
+        loss_value = loss_fn()
+
+        # Normalize the wavefunction before computing gradients
+        if hasattr(objective.wfn, "normalize"):
+            # print("objective.pspace_n: ", objective.pspace_n)
+            objective.wfn.normalize(objective.pspace_n)
+
+        grad_np = objective.gradient(params.detach().numpy())
+        # Gradient clipping
+        grad_norm = np.linalg.norm(grad_np)
+        print(f"Iteration {i}, Loss = {loss_value}, Grad norm = {grad_norm}")
+        if grad_norm > max_grad_norm:
+            grad_np = grad_np * (max_grad_norm / grad_norm)
+            print("Clipped gradient norm from {} to {}".format(grad_norm, max_grad_norm))
+
+        params.grad = torch.from_numpy(grad_np).to(params.device, dtype=torch.float64)
+
+        # Backpropogation
+        # loss.backward()
+        # print(f"Gradients: {params.grad}")
+
+        # Check convergence
+        if prev_energy is not None:
+            delta_E = abs(loss_value - prev_energy)
+            grad_norm = np.linalg.norm(grad_np)
+            if delta_E < tol_E and grad_norm < tol_grad:
+                print(f"Iteration {i}, Loss = {loss_value}")
+                print(f"Converged at iteration {i}, ΔE={delta_E}, ||grad||={grad_norm}")
+                print(f'Final parameters: {params.detach().numpy()}')
+                break
+        prev_energy = loss_value
+
+        # Optimization step
+        optimizer.step()
+        scheduler.step() # Update learning rate
+
+        # Get the current learning rate from the scheduler
+        # current_lr = scheduler.get_last_lr()
+        # if original_lr != current_lr[0]:
+            # print(f"Iteration {i}, Learning Rate: {current_lr}")
+
+
+        # Update Fanpy parameters   
+        # print(f"Updated parameters: {params.detach().numpy()}")
+        objective.wfn.assign_params(params.detach().numpy())
+
+        # Renormalize the wavefunction after updating parameters
+        # if hasattr(objective.wfn, "normalize"):
+        #     objective.wfn.normalize(objective.pspace_n)
+
+        # if i % 10 == 0:
+        #     print(f"Iteration {i}, Loss = {loss_value}")
+
+    output = {
+        "success": True,
+        "params": params.detach().numpy(),
+        "energy": loss_fn(),
+        "message": "Optimization completed with Adam.",
+        "internal": None,
+    }
+    return output
+
