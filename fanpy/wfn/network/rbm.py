@@ -1,6 +1,6 @@
-"""Implementation of Standard RBM expression"""
+"""Implementation of Standard RBM expression by Pratiksha"""
 
-from fanpy.tools import slater
+from fanpy.tools import slater, sd_list
 from fanpy.wfn.base import BaseWavefunction
 import numpy as np
 import random
@@ -42,63 +42,100 @@ class RestrictedBoltzmannMachine(BaseWavefunction):
 
     """
 
-    def __init__(self, nelec, nspin, bath=[0, 1], params=None, memory=None, orders=(1)):
+    def __init__(self, nelec, nspin, nhidden, params=None, memory=None, orders=(1)):
 
         super().__init__(nelec, nspin, memory=memory)
-        self.bath = np.array(bath)
         self.orders = np.array(orders)
+        self.nhidden = nhidden
         self._template_params = None
+        
+        self.output_scale = 1.0  # normalization factor for wavefunction
+        self._prev_params = None
+        self.iter_count = 0
         self.assign_params(params=params)
+
+        seed = 12345
+        random.seed(seed)
+        np.random.seed(seed)
+        # os.environ["PYTHONHASHSEED"] = str(seed)
 
     @property
     def params(self):
         return np.hstack([i.flat for i in self._params])
 
     @property
-    def nbath(self):
-        return self.bath.size
-
-    @property
     def nparams(self):
-        return np.sum(self.nspin**self.orders) + self.nbath + (self.nspin * self.nbath) + (self.nspin + 1)
+        return np.sum(self.nspin**self.orders) + self.nhidden + (self.nspin * self.nhidden)
 
-    @property
-    def nsign_params(self):
-        # total sign params = sign_params_for_virtual +1 (bias)
-        return self.nspin + 1
 
     @property
     def params_shape(self):
         # Coefficient matrix for interaction order = 1 with size (nspin)
         # Coefficient matrix for interaction order = 2 with size (nspin, nspin)
-        # Coefficient matrix for hidden variables with size (nbath)
-        # weights matrix of size nbath x nspin
-        return [((self.nspin,) * self.orders)] + [(self.nbath,)] + [(self.nspin, self.nbath)] + [(self.nspin + 1,)]
+        # Coefficient matrix for hidden variables with size (nhidden)
+        # weights matrix of size nhidden x nspin
+        return [((self.nspin,) * self.orders)] + [(self.nhidden,)] + [(self.nspin, self.nhidden)]
 
     @property
     def template_params(self):
         return self._template_params
 
-    @staticmethod
-    def sign_correction(x):
-        return np.tanh(x)
+    @property
+    def pspace(self):
+        return sd_list.sd_list(self.nelec, self.nspin, num_limit=None, spin=0) #spin=0 : spin restricted sds
+    
+    @property
+    def spin(self):
+        return 0
 
-    @staticmethod
-    def sign_correction_deriv(x):
-        return 1 - np.tanh(x) ** 2
 
     def assign_template_params(self):
         params = []
-        random.seed(10)
-        for i, param_shape in enumerate(self.params_shape[:-1]):
-            random_params = [(random.random() * 0.04) - 0.02 for _ in range(np.prod(param_shape))]
-            random_params = np.array(random_params).reshape(param_shape)
-            params.append(random_params)
 
-        random_params = [(random.random() * 0.04) - 0.02 for _ in range(self.nsign_params)]
-        sign_params = np.array(random_params)
-        params.append(sign_params)
+        # Initialize visible bias (a) based on mean occupation
+        # occ_mask = np.zeros(self.nspin, dtype=np.float64)  # Ensure correct dtype for occ_mask
+
+        # # Initialize an array to store the sum of occupations for each spin orbital
+        # occupation_sum = np.zeros(self.nspin, dtype=np.float64)
+
+        # # Iterate over all configurations in self.pspace
+        # for sd in self.pspace:
+        #     occ_indices = slater.occ_indices(sd)  # Get occupied indices for this configuration
+        #     occ_mask.fill(0)  # Reset occ_mask for each configuration
+        #     occ_mask[occ_indices] = 1.0  # Mark the occupied spins
+        #     occupation_sum += occ_mask  # Add the current configuration's occupation to the sum
+
+        # # Compute the mean occupation across all configurations for each spin orbital
+        # mean_occupation = occupation_sum / len(self.pspace)
+
+        # print("Mean occupation per spin orbital:", mean_occupation)
+
+        # # Initialize visible bias based on mean occupation
+        # visible_bias = mean_occupation + np.random.uniform(-0.02, 0.02, size=self.nspin)
+
+        # Initialize visible bias (a) based on HF
+        # occ = slater.occ_indices(slater.ground(self.nelec, self.nspin))
+        # hf_string = np.ones(self.nspin, dtype=float) * -1.0 
+        # hf_string[occ] = 1.0
+        # visible_bias = hf_string + np.random.uniform(-0.02, 0.02, size=self.nspin)
+        # print("visible_bias (a) initialized to HF + noise:", visible_bias) 
+        # print("Ground state:", slater.ground(self.nelec, self.nspin), slater.occ_indices(slater.ground(self.nelec, self.nspin)), hf_string)
+
+        # Initialize visible bias (a) to small random values
+        visible_bias = np.random.uniform(-0.01, 0.001, size=self.nspin)
+        params.append(visible_bias)
+
+        # Initialize hidden bias (b) to small random values
+        # hidden_bias = hf_string + np.random.uniform(-0.02, 0.02, size=self.nhidden)
+        hidden_bias = np.random.uniform(-0.01, 0.001, size=self.nhidden)
+        params.append(hidden_bias)
+
+        # Initialize weights (w) to small random values
+        weights = np.random.uniform(-0.01, 0.001, size=(self.nspin, self.nhidden)) 
+        params.append(weights)
+
         self._template_params = params
+
 
     def assign_params(self, params=None, add_noise=False):
         if params is None:
@@ -112,138 +149,203 @@ class RestrictedBoltzmannMachine(BaseWavefunction):
                 structured_params.append(params[: np.prod(param_shape)].reshape(*param_shape))
                 params = params[np.prod(param_shape) :]
             params = structured_params
+            #print("Inside assign_params")
 
+        if self._prev_params is not None:
+            # check difference
+            deltas = [np.max(np.abs(p - q)) for p, q in zip(params, self._prev_params)]
+            delta = max(deltas)
+            max_val = max(np.max(np.abs(p)) for p in params)
+            # print(f"\n\tIteration {self.iter_count}: max parameter change = {delta}, max parameter value = {max_val}")
+
+            # warn if exploding
+            if max_val > 10:
+                print(f"⚠️ Parameters exploding beyond 10 at iteration {self.iter_count}!")
+
+        self._prev_params = params.copy()
+        self.iter_count += 1
+        
+        # Invalidate the overlap cache as parameters have changed
+        self._overlap_cache = {}
+        
+        # Reset normalization (must compute by calling normalize() explicitly)
+        self.output_scale = 1.0
+
+        # store parameters
         self._params = params
-        a = self._params[0]
-        b = self._params[1]
-        w = self._params[2]
-        sign_params = self._params[3]
-        # print("\na = np.",repr(a),"\nb=np.",repr(b),"\nw=np.",repr(w),"\nsign_params=np",repr(sign_params), "\n")
 
-    def get_overlaps(self, sds, deriv=None):
+    def log2cosh(self, t):
+        """Stable evaluation of log(2*cosh(t)) elementwise."""
+        t = np.asarray(t, dtype=np.float64)
+        at = np.abs(t)
+        # at + log(1 + exp(-2|t|)) is stable for large |t|
+        return at + np.log1p(np.exp(-2.0 * at))
+
+
+    def safe_log_abs_tanh(self, gamma):
+        """Return log|tanh(gamma)| in a numerically stable way (scalar gamma)."""
+        g = float(gamma)
+        # For large |g|, tanh(g) -> ±1, log|tanh| -> 0
+        # For small |g|, tanh(g) ~ g -> log|tanh| ~ log|g|
+        abs_g = abs(g)
+        if abs_g > 1e-6:
+            return np.log(abs(np.tanh(g)))
+        # Use series / fallback to log(|g|) with tiny safety offset
+        return np.log(abs_g + 1e-300)
+
+
+    def safe_dlogtanh_over_dgamma(self, gamma):
+        """
+        Compute (1 - tanh^2(gamma)) / tanh(gamma) safely for scalar gamma.
+        This equals d/dgamma log|tanh(gamma)|.
+        For small gamma use series expansion: tanh(g) = g - g^3/3 + ...
+        (1 - tanh^2)/tanh ≈ 1/g - g/3.
+        """
+        g = float(gamma)
+        tg = np.tanh(g)
+        abs_g = abs(g)
+        if abs_g > 1e-6 and tg != 0.0:
+            return (1.0 - tg * tg) / tg
+        # small gamma: use series approx
+        if abs_g < 1e-300:
+            # avoid division by zero: return large value consistent with 1/g behavior
+            return 1.0 / (g + 1e-300)
+        # series approx: 1/g - g/3
+        return 1.0 / g - g / 3.0
+    
+
+    def normalize(self, pspace=None):
+        """Normalize the RBM wavefunction such that <Psi|Psi> = 1."""
+        # Compute all overlaps (no derivatives)
+        self.get_overlaps(deriv=None, normalized=False)
+        # print("Raw overlaps (unnormalized): ", [self._overlap_cache[sd]['overlap'] for sd in self.pspace])
+
+        if pspace is not None:
+            if len(pspace) != len(self._overlap_cache):
+                raise ValueError("Provided pspace length does not match cached overlaps length.")
+            # Ensure the order of overlaps matches the provided pspace
+            # overlaps_dict = {sd: ov for sd, ov in zip(self.pspace, overlaps)}
+            overlaps = np.array([self._overlap_cache[sd]['overlap'] for sd in pspace])            
+
+        # Compute norm = sqrt(sum |overlap|^2)
+        norm = np.sqrt(np.sum(np.abs(overlaps) ** 2))
+
+        if norm == 0.0:
+            raise ValueError("Wavefunction has zero norm; cannot normalize.")
+
+        # store scalar scale factor applied when returning overlaps
+        self.output_scale = 1.0 / norm
+
+        return norm
+
+
+    def get_overlaps(self, deriv=None, normalized=True):
+        """
+        Compute & cache RBM overlaps using log-trick and return overlaps or derivatives.
+        If normalized=True, returned values are multiplied by self.output_scale (a scalar).
+        The cache always stores raw (unnormalized) psi and raw derivatives.
+        """
+
+        # ensure float64 arithmetic
+        a = np.asarray(self._params[0], dtype=np.float64)  # (Nv,)
+        b = np.asarray(self._params[1], dtype=np.float64)  # (Nh,)
+        w = np.asarray(self._params[2], dtype=np.float64)  # (Nv, Nh)
+        assert w.shape == (self.nspin, self.nhidden)
+
+        def check_params(a, b, w, threshold=10.0):
+            max_val = max(np.max(np.abs(a)), np.max(np.abs(b)), np.max(np.abs(w)))
+            if max_val > threshold:
+                print(f"Warning: parameter magnitude {max_val} exceeds threshold {threshold}")
+        
+        check_params(a, b, w)
+
+        sds = self.pspace
         if len(sds) == 0:
             return np.array([])
 
-        occ_indices = np.array([slater.occ_indices(sd) for sd in sds])
-        occ_mask = np.zeros((len(sds), self.nspin))
-        for i, inds in enumerate(occ_indices):
-            occ_mask[i, inds] = 1.0
+        # We'll populate cache entries for all sds requested (or all if deriv requested)
+        compute_deriv = deriv is not None
 
-        a = self._params[0]
-        b = self._params[1]
-        w = self._params[2]
-        sign_params = self._params[3]
-        # print("\na = np.",repr(a),"\nb=np.",repr(b),"\nw=np.",repr(w),"\nsign_params=np",repr(sign_params), "\n")
-        # print("occ_mask = np.",repr(occ_mask))
-        # print("h = np.",repr(self.bath))
-        # print("sds = ",repr(sds))
+        for sd in sds:
+            # If cached and we have what we need, skip
+            if sd in self._overlap_cache:
+                if (not compute_deriv) or ("derivative" in self._overlap_cache[sd]):
+                    continue
 
-        olp_ = []
-        numerator = []
-        sign_output = []
-        exp_n = []  # numerator * occ_vec, for each sds
-        exp_h = []  # numerator * self.bath, for each sds
-        exp_nh = []  # numerator * outer_product(occ_vec, self.bath), for each sds
+            # build occupation vector x in {-1, +1} (our convention)
+            occ_mask = np.ones(self.nspin, dtype=np.float64) * -1.0
+            occ_mask[slater.occ_indices(sd)] = 1.0  # shape (Nv,)
 
-        for i in range(len(sds)):
-            occ_vec = np.array(occ_mask[i])
-            # print("\ni, occ_vec:", i, occ_vec)
-            sum_1 = np.sum(a * occ_vec) + np.sum(b * self.bath)
-            outer_oh = np.einsum("i,j->ij", occ_vec, self.bath)
-            sum_oh = w.ravel() * outer_oh.ravel()
-            # print("w.ravel():", w.ravel())
-            # print("outer_oh.ravel():", outer_oh.ravel())
-            # print("\nsum_oh:", sum_oh)
-            sum_oh = np.sum(sum_oh)
-            numerr = np.exp(sum_1 + sum_oh)
-            # we are using only one list of hidden variables unlike the set of virtual varibles which
-            # constitutes len(sds) number of occupation vectors.
+            # scalar gamma and vector theta
+            gamma = float(np.dot(a, occ_mask))          # scalar
+            # Note: w is (Nv, Nh), so w.T @ occ_mask -> (Nh,)
+            theta = b + (w.T @ occ_mask)               # shape (Nh,)
 
-            numerator.append(numerr)  # appending the numerator
-            exp_n.append(numerr * occ_vec)
-            exp_h.append(numerr * self.bath)
-            exp_nh.append(numerr * outer_oh)
+            # log|psi| using stable funcs
+            logabs_tanh = self.safe_log_abs_tanh(gamma)  # scalar # log |tanh(gamma)|
+            log_sum_coshs = np.sum(self.log2cosh(theta)) # scalar #sum log(2*cosh(theta))
+            logabs_psi = logabs_tanh + log_sum_coshs
 
-            sign_input = np.sum(sign_params[:-1] * occ_vec) + sign_params[-1]
-            sign_result = self.sign_correction(sign_input)
-            # print("i, sign_input, sign_result:", i, sign_result)
-            sign_output.append(sign_result)
-            # print("\nsds, sign_correction", sds[i], sign_result, "\n")
+            sign_gamma = np.tanh(gamma) if gamma != 0.0 else 1e-300
+            psi = sign_gamma * np.exp(logabs_psi)
 
-        numerator = np.array(numerator)
-        partition_func = np.sum(numerator)  # denominator
-        sign_output = np.array(sign_output)
-        exp_n = np.array(exp_n)
-        exp_h = np.array(exp_h)
-        exp_nh = np.array(exp_nh)
-        # print("\nnumerator = np.",repr(numerator))
-        # print("\npartition_func: ", partition_func)
-        # print("\nexp_n = np.",repr(exp_n))
-        # print("\nexp_h = np.",repr(exp_h))
-        # print("\nexp_nh = np.",repr(exp_nh))
-        # print("\nsign_output = np.",repr(sign_output))
+            # store raw overlap (unnormalized)
+            self._overlap_cache[sd] = {"overlap": psi}
 
-        if len(numerator) == len(sign_output) == len(sds):
-            f_wfn = np.sqrt(numerator / partition_func)
-            # print("\nroot P", f_wfn)
-            olp_ = f_wfn * sign_output
-            # print("\nfinal olp", olp_)
+            if compute_deriv:
+                # raw derivatives d log|psi| / d param
+                pref_a = self.safe_dlogtanh_over_dgamma(gamma)  # scalar
+                dlog_da = occ_mask * pref_a                      # (Nv,)
+                dlog_db = np.tanh(theta)                      # (Nh,)
+                dlog_dW_temp = dlog_db[:, None] * occ_mask[None, :]  # (Nh, Nv)
+                dlog_dW = dlog_dW_temp.T  # (Nv, Nh) to match params order
 
+                # derivatives of psi = psi * dlog
+                dpsi_da = psi * dlog_da                       # (Nv,)
+                dpsi_db = psi * dlog_db                       # (Nh,)
+                dpsi_dW = psi * dlog_dW                       # (Nv, Nh)
+        
+                # Flatten into [a (Nv,), b (Nh,), W (Nv*Nh,) ] matching params_shape
+                derivs_flat = np.hstack([dpsi_da, dpsi_db, dpsi_dW.ravel()])
+                self._overlap_cache[sd]["derivative"] = derivs_flat
+
+        # After loop return requested arrays in order of sds
+        if not compute_deriv:
+            overlaps_raw = np.array([self._overlap_cache[sd]["overlap"] for sd in sds])
+            if normalized:
+                return overlaps_raw * self.output_scale
+            return overlaps_raw
+        else:
+            derivs_raw =  np.array([self._overlap_cache[sd]["derivative"] for sd in sds])
+            if normalized:
+                return derivs_raw * self.output_scale
+            return derivs_raw
+        
+
+    def get_overlap(self, sd, deriv=None, normalized=True):
+        """
+        Return overlap or derivative for a single Slater determinant `sd`.
+
+        Ensures the cache contains the required data:
+        - if only the raw overlap is in cache and derivatives are requested, this
+            will call get_overlaps(..., normalized=False) to populate raw derivatives.
+        """
+        need_deriv = deriv is not None
+        
+        # If sd missing entirely OR derivatives are requested but not cached, compute them
+        if (sd not in self._overlap_cache) or (need_deriv and "derivative" not in self._overlap_cache[sd]):
+            # Request raw cache population. Pass normalized=False to avoid circular calls to normalize().
+            self.get_overlaps(deriv=None if deriv is None else list(range(self.nparams)))
+
+        # Now the cache must contain requested entries
         if deriv is None:
-            return np.array(olp_)
+            # Return the cached raw overlap, scaled if requested
+            raw = self._overlap_cache[sd]["overlap"]
+            return raw * self.output_scale if normalized else raw
+        else:
+            # Return the cached raw derivatives for the specified indices, scaled if requested
+            raw_deriv = self._overlap_cache[sd]["derivative"][deriv]
+            return raw_deriv * self.output_scale if normalized else raw_deriv
 
-        ### If deriv is not None
-        output = []
-
-        for i in range(len(sds)):
-            occ_vec = occ_mask[i]
-            # print(f"\n----PRINTING derivatives info for sd={sds[i]}------\n")
-            # if i in [0,1,2]:
-            # Derivative with respect to coefficients of virtual variables
-            # print("\nnp.sum(exp_n, axis=0):", np.sum(exp_n, axis=0))
-            # print("\npartition_func: ", partition_func)
-            # print("occ_vec: ", occ_vec)
-            # print("partition_func * occ_vec: ", partition_func * occ_vec)
-            term = (partition_func * occ_vec - np.sum(exp_n, axis=0)) / partition_func
-            result = 1.0 / 2.0 * olp_[i] * term
-            sd_i = np.hstack((np.array([]), result))
-            # if i in [0,1,2]:
-            # print("\nwrt a =", repr(result))
-
-            # Derivative with respect to hidden variables
-            term = (partition_func * self.bath - np.sum(exp_h, axis=0)) / partition_func
-            result = 1.0 / 2.0 * olp_[i] * term
-            sd_i = np.hstack((sd_i, result))
-            # if i in [0,1,2]:
-            # print("\nwrt b =", repr(result))
-
-            # Derivative with respect to weights
-            result = 1.0
-            outer_oh = np.einsum("i,j->ij", occ_vec, self.bath)
-            term = (partition_func * outer_oh - np.sum(exp_nh, axis=0)) / partition_func
-            result = 1.0 / 2.0 * olp_[i] * term.ravel()
-            sd_i = np.hstack((sd_i, result))
-            # if i in [0,1,2]:
-            # print("\nwrt w =", repr(result))
-
-            # Derivative with respect to sign_params for virtual
-            result = f_wfn[i] * (1 - sign_output[i] ** 2) * occ_vec
-            sd_i = np.hstack((sd_i, result))
-            # if i in [0,1,2]:
-            # print("\nwrt d =", repr(result))
-
-            # Derivative with respect to sign_params for bias
-            result = f_wfn[i] * (1 - sign_output[i] ** 2)
-            sd_i = np.hstack((sd_i, result))
-            # if i in [0,1,2]:
-            # print("\nwrt e =",repr(result))
-            # print(f"\nWHOLE array of derivatives for sd={sds[i]}:\n", sd_i)
-
-            output.append(list(sd_i))
-        output = np.array(output)
-        # print("\na: ", a, "\nb: ",b, "\nw: ", w, "\nsign_params", sign_params)
-        # print('\n\nlen(sds)', len(sds), '\n')
-        # print("\noverlap", olp_)
-        # print("\nolp derivative", output)
-        # print(deriv)
-        return output[:, deriv]
+        
+      
