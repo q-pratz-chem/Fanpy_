@@ -9,7 +9,7 @@ import sys
 np.set_printoptions(threshold=sys.maxsize)
 
 
-class RestrictedBoltzmannMachine(BaseWavefunction):
+class tanhRBM(BaseWavefunction):
     r"""Restricted Boltzmann Machine (RBM) as a Wavefunction
     Expression
     ----------
