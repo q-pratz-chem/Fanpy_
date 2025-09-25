@@ -13,8 +13,9 @@ class tanhRBM(BaseWavefunction):
     r"""Restricted Boltzmann Machine (RBM) as a Wavefunction
     Expression
     ----------
-     f(\vec{a}, \vec{b}, \textbf{w}, \vec{c}, d, \vec{n}) = \sqrt{\frac{exp(\sum_i a_i n_i + \sum_j b_j h_j + \sum_{ij} w_{ij} n_i h_j)}{\sum_{\{n\}}exp(\sum_i a_i n_i + \sum_j b_j h_j + \sum_{ij} w_{ij} n_i h_j)}} tanh(\sum_k c_k n_k + d)
-
+    ..math::
+        \Psi(\textbf{x}) = sign(tanh(\gamma)) tanh(gamma) \prod_{i=1}^{N_h} 2 cosh(\theta_i),
+            \text{where} \gamma = \sum_j a_j x_j, \quad \theta_i = b_i + \sum_{i,j} w_{i,j}x_j
 
     Using the probability distribution representation by RBM as a wavefunction.
 
