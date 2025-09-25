@@ -90,52 +90,41 @@ class tanhRBM(BaseWavefunction):
         return 0
 
 
-    def assign_template_params(self):
-        params = []
+    def assign_template_params(self, hf_init=False, seed=12345):
 
-        # Initialize visible bias (a) based on mean occupation
-        # occ_mask = np.zeros(self.nspin, dtype=np.float64)  # Ensure correct dtype for occ_mask
+        rng = np.random.default_rng(seed)
 
-        # # Initialize an array to store the sum of occupations for each spin orbital
-        # occupation_sum = np.zeros(self.nspin, dtype=np.float64)
+        Nv = self.nspin
+        Nh = self.nhidden
+        # base scale depends on visible size (helps keep sums small)
+        scale = 1.0 / max(1.0, np.sqrt(Nv))
+        
 
-        # # Iterate over all configurations in self.pspace
-        # for sd in self.pspace:
-        #     occ_indices = slater.occ_indices(sd)  # Get occupied indices for this configuration
-        #     occ_mask.fill(0)  # Reset occ_mask for each configuration
-        #     occ_mask[occ_indices] = 1.0  # Mark the occupied spins
-        #     occupation_sum += occ_mask  # Add the current configuration's occupation to the sum
+        # Option A: small random initialization (recommended default)
+        sigma_w = 0.005 * scale                 # weight stddev
+        sigma_a = 1e-4                          # visible bias scale
+        sigma_b = 1e-4                          # hidden bias scale
 
-        # # Compute the mean occupation across all configurations for each spin orbital
-        # mean_occupation = occupation_sum / len(self.pspace)
+        a = rng.normal(0.0, sigma_a, size=(Nv,))
+        b = rng.normal(0.0, sigma_b, size=(Nh,))
+        w = rng.normal(0.0, sigma_w, size=(Nv, Nh))
 
-        # print("Mean occupation per spin orbital:", mean_occupation)
+        if hf_init:
+            # HF-informerd residual initialization
+            occ = slater.occ_indices(slater.ground(self.nelec, self.nspin))
+            hf_mask = np.ones(self.nspin, dtype=np.float64) * -1.0
+            hf_mask[occ] = 1.0
 
-        # # Initialize visible bias based on mean occupation
-        # visible_bias = mean_occupation + np.random.uniform(-0.02, 0.02, size=self.nspin)
+            # Choose b so that theta_HF = 0 => b = - w^T @ hf_mask
+            # This centers hidden activations around zero for the HF config
+            b = - (w.T @ hf_mask)
 
-        # Initialize visible bias (a) based on HF
-        # occ = slater.occ_indices(slater.ground(self.nelec, self.nspin))
-        # hf_string = np.ones(self.nspin, dtype=float) * -1.0 
-        # hf_string[occ] = 1.0
-        # visible_bias = hf_string + np.random.uniform(-0.02, 0.02, size=self.nspin)
-        # print("visible_bias (a) initialized to HF + noise:", visible_bias) 
-        # print("Ground state:", slater.ground(self.nelec, self.nspin), slater.occ_indices(slater.ground(self.nelec, self.nspin)), hf_string)
-
-        # Initialize visible bias (a) to small random values
-        visible_bias = np.random.uniform(-0.01, 0.001, size=self.nspin)
-        params.append(visible_bias)
-
-        # Initialize hidden bias (b) to small random values
-        # hidden_bias = hf_string + np.random.uniform(-0.02, 0.02, size=self.nhidden)
-        hidden_bias = np.random.uniform(-0.01, 0.001, size=self.nhidden)
-        params.append(hidden_bias)
-
-        # Initialize weights (w) to small random values
-        weights = np.random.uniform(-0.01, 0.001, size=(self.nspin, self.nhidden)) 
-        params.append(weights)
-
-        self._template_params = params
+            # Choose a small visible bias to weakly prefer HF (optional)
+            a = 1e-2 * hf_mask      # very small HF bias; tweak 0.01-0.2 as needed
+        else:
+            b = rng.normal(0.0, sigma_b, size=(Nh,))
+        # Store templated params
+        self._template_params = [a, b, w]
 
 
     def assign_params(self, params=None, add_noise=False):
@@ -227,7 +216,8 @@ class tanhRBM(BaseWavefunction):
             # Ensure the order of overlaps matches the provided pspace
             # overlaps_dict = {sd: ov for sd, ov in zip(self.pspace, overlaps)}
             overlaps = np.array([self._overlap_cache[sd]['overlap'] for sd in pspace])            
-
+        else:
+            overlaps = np.array([self._overlap_cache[sd]['overlap'] for sd in self.pspace])
         # Compute norm = sqrt(sum |overlap|^2)
         norm = np.sqrt(np.sum(np.abs(overlaps) ** 2))
 
@@ -287,7 +277,7 @@ class tanhRBM(BaseWavefunction):
             log_sum_coshs = np.sum(self.log2cosh(theta)) # scalar #sum log(2*cosh(theta))
             logabs_psi = logabs_tanh + log_sum_coshs
 
-            sign_gamma = np.tanh(gamma) if gamma != 0.0 else 1e-300
+            sign_gamma = np.sign(np.tanh(gamma)) if gamma != 0.0 else 1e-300
             psi = sign_gamma * np.exp(logabs_psi)
 
             # store raw overlap (unnormalized)
