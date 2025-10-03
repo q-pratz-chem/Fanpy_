@@ -196,6 +196,82 @@ def minimize(objective, use_gradient=True, **kwargs):
 
     return output
 
+def basinhopping(objective, niter=200, T=1.0, stepsize=0.5, use_gradient=False, **kwargs):
+    """Solve an equation using scipy.optimize.basinhopping.
+
+    Parameters
+    ----------
+    objective : BaseSchrodinger
+        Instance that contains the function that will be optimized.
+    niter : int
+        Number of basin hopping iterations.
+    T : float
+        "Temperature" parameter for accepting uphill moves.
+    stepsize : float
+        Maximum step size for random displacements.
+    use_gradient : bool
+        Whether to use gradient information in local minimization.
+    kwargs : dict
+        Extra keyword arguments passed to the local minimizer (e.g., method, options).
+
+    Returns
+    -------
+    dict
+        Results of the optimization in the same format as cma/minimize/adam.
+    """
+    import scipy.optimize as opt
+
+    if not isinstance(objective, BaseSchrodinger):
+        raise TypeError("Objective must be a BaseSchrodinger instance.")
+    if objective.num_eqns != 1:
+        raise ValueError("Objective must contain only one equation.")
+
+    # Disable Hamiltonian updates for stochastic methods
+    objective.ham.update_prev_params = False
+    objective.step_print = False
+
+    # Define local minimizer settings
+    if use_gradient:
+        minimizer_kwargs = {
+            "method": "BFGS",
+            "jac": objective.gradient,
+            "options": {"gtol": 1e-6}
+        }
+    else:
+        minimizer_kwargs = {
+            "method": "Powell",
+            "options": {"xtol": 1e-6, "ftol": 1e-6}
+        }
+    # User can override via kwargs
+    minimizer_kwargs.update(kwargs.get("minimizer_kwargs", {}))
+
+    # Run basin hopping
+    result = opt.basinhopping(
+        func=objective.objective,
+        x0=objective.active_params,
+        niter=niter,
+        T=T,
+        stepsize=stepsize,
+        minimizer_kwargs=minimizer_kwargs,
+        disp=True
+    )
+
+    output = {
+        "success": result.lowest_optimization_result.success,
+        "params": result.x,
+        "function": result.fun,
+        "energy": result.fun if isinstance(objective, (EnergyOneSideProjection, EnergyTwoSideProjection, LeastSquaresEquations)) else None,
+        "message": f"Basinhopping terminated after {niter} iterations.",
+        "internal": result,
+    }
+
+    # Save final parameters
+    objective.assign_params(result.x)
+    objective.save_params()
+
+    return output
+
+
 
 def adam(objective, lr=0.001, betas=(0.9,0.99), max_iter=1000, **kwargs):
     """Optimize the given objective using the Adam optimizer. (PyTorch).
