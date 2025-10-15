@@ -408,3 +408,116 @@ def adam(objective, lr=0.001, betas=(0.9,0.99), max_iter=1000, **kwargs):
     }
     return output
 
+def SGD(objective, lr=0.01, momentum=0.9, weight_decay=0.0, max_iter=1000, **kwargs):
+    """Optimize the given objective using the SGD optimizer (PyTorch).
+
+    Parameters
+    ----------
+    objective : BaseSchrodinger
+        Instance that contains the function that will be optimized.
+    lr : float
+        Learning rate.
+    momentum : float
+        Momentum factor (default: 0.9).
+    weight_decay : float
+        Weight decay (L2 regularization term).
+    max_iter : int
+        Maximum number of iterations.
+    kwargs : dict
+        Extra arguments, e.g. 'scheduler_step', 'scheduler_gamma', 'max_grad_norm'.
+
+    Returns
+    -------
+    dict
+        Results of the optimization in the same format as cma/minimize/adam.
+    """
+    import torch
+    from torch.optim import SGD
+    from torch.optim.lr_scheduler import StepLR
+    import numpy as np
+
+    # --- Validation ---
+    if not isinstance(objective, BaseSchrodinger):
+        raise TypeError("Objective must be a BaseSchrodinger instance.")
+    if objective.num_eqns != 1:
+        raise ValueError("Objective must contain only one equation.")
+
+    # Disable Hamiltonian updates (iterative optimizer)
+    objective.ham.update_prev_params = False
+    objective.step_print = False
+
+    # --- Initialize PyTorch params ---
+    params = torch.tensor(objective.wfn.params, requires_grad=True, dtype=torch.float64)
+
+    optimizer = SGD(
+        [params],
+        lr=lr,
+        momentum=momentum,
+        weight_decay=weight_decay,
+        nesterov=kwargs.get("nesterov", False)
+    )
+
+    scheduler = StepLR(
+        optimizer,
+        step_size=kwargs.get("scheduler_step", 500),
+        gamma=kwargs.get("scheduler_gamma", 0.9)
+    )
+
+    max_grad_norm = kwargs.get("max_grad_norm", 20.0)
+    tol_E = kwargs.get("tol_E", 1e-7)
+    tol_grad = kwargs.get("tol_grad", 1e-6)
+    prev_energy = None
+
+    def loss_fn():
+        params_np = params.detach().cpu().numpy()
+        return objective.objective(params_np)
+
+    print('###\nPerforming SGD optimization with lr = {}, momentum = {}, weight_decay = {}, max_iter = {}'.format(
+        lr, momentum, weight_decay, max_iter))
+    print(f'Scheduler: step every {scheduler.step_size} iters, γ = {scheduler.gamma}')
+    print('Initial loss:', loss_fn())
+    print('###')
+
+    # --- Optimization loop ---
+    for i in range(max_iter):
+        optimizer.zero_grad()
+        loss_value = loss_fn()
+
+        # Normalize wavefunction if available
+        # if hasattr(objective.wfn, "normalize"):
+        #     objective.wfn.normalize(objective.pspace_n)
+
+        grad_np = objective.gradient(params.detach().numpy())
+        grad_norm = np.linalg.norm(grad_np)
+        print(f"Iteration {i}, Loss = {loss_value}, Grad norm = {grad_norm}")
+
+        # Gradient clipping
+        if grad_norm > max_grad_norm:
+            grad_np *= (max_grad_norm / grad_norm)
+            print(f"Clipped gradient norm to {max_grad_norm}")
+
+        params.grad = torch.from_numpy(grad_np).to(params.device, dtype=torch.float64)
+
+        # Convergence check
+        if prev_energy is not None:
+            delta_E = abs(loss_value - prev_energy)
+            if delta_E < tol_E and grad_norm < tol_grad:
+                print(f"Converged at iteration {i}, ΔE={delta_E}, ||grad||={grad_norm}")
+                break
+        prev_energy = loss_value
+
+        optimizer.step()
+        scheduler.step()
+
+        # Update parameters in Fanpy
+        objective.wfn.assign_params(params.detach().numpy())
+
+    output = {
+        "success": True,
+        "params": params.detach().numpy(),
+        "energy": loss_fn(),
+        "message": "Optimization completed with SGD.",
+        "internal": None,
+    }
+    return output
+
