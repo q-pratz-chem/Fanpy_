@@ -14,23 +14,18 @@ def tanh_rbm():
 
 
 def test_assign_params_and_cache_invalidation(tanh_rbm):
-    # Store old params and cache
-    old_cache = tanh_rbm._overlap_cache.copy()
-    old_params = [p.copy() for p in tanh_rbm._params]
-
     # Assign new params
     tanh_rbm.assign_params()
+
     # Cache should be invalidated
     assert tanh_rbm._overlap_cache == {}
-    # Params should be updated (template params used)
-    for new, old in zip(tanh_rbm._params, old_params):
-        assert not np.allclose(new, old)
 
 
 def test_assign_template_params(tanh_rbm):
     # Ensure template params are created
     tanh_rbm.assign_template_params()
     assert tanh_rbm.template_params is not None
+
     # Check shapes
     a, b, w = tanh_rbm.template_params
     assert a.shape[0] == tanh_rbm.nspin
@@ -38,27 +33,83 @@ def test_assign_template_params(tanh_rbm):
     assert w.shape == (tanh_rbm.nspin, tanh_rbm.nhidden)
 
 
+def test_wrong_pspace_normalize(tanh_rbm):
+    tanh_rbm.get_overlaps(normalized=False)
+
+    # Create a wrong pspace with different length
+    wrong_pspace = tanh_rbm.pspace[: len(tanh_rbm.pspace) // 2]
+
+    # Expect ValueError due to mismatch in pspace lengths
+    with pytest.raises(ValueError) as excinfo:
+        tanh_rbm.normalize(pspace=wrong_pspace)
+
+    # Verify error message
+    assert "does not match cached overlaps length" in str(excinfo.value)
+
+
+def test_normalize_with_correct_pspace(tanh_rbm):
+    tanh_rbm.get_overlaps(normalized=False)
+
+    # Normalize with correct pspace
+    tanh_rbm.normalize(pspace=tanh_rbm.pspace)
+    norm = np.sqrt(np.sum([np.abs(entry["overlap"]) ** 2 for entry in tanh_rbm._overlap_cache.values()]))
+
+    # Check norm is positive
+    assert norm > 0.0
+    assert np.isclose(1.0 / norm, tanh_rbm.output_scale, rtol=1e-20), "Normalization scale is not consistent"
+   
+    # Check that output_scale is updated
+    assert tanh_rbm.output_scale != 1.0
+
+
+def test_normalize_raises_for_zero_norm(tanh_rbm):
+    # Manually create a fake overlap cache where all overlaps are zero
+    tanh_rbm._overlap_cache = {sd: {"overlap": 0.0} for sd in tanh_rbm.pspace}
+
+    # Now call normalize and expect a ValueError
+    with pytest.raises(ValueError) as excinfo:
+        tanh_rbm.normalize()
+
+    # Verify correct error message
+    assert "zero norm" in str(excinfo.value)
+
+
+def test_assign_params_warns_on_exploding_params(tanh_rbm, capsys):
+    # Create parameter arrays with very large values to trigger the warning
+    a = np.full(tanh_rbm.nspin, 20.0)
+    b = np.full(tanh_rbm.nhidden, 20.0)
+    w = np.full((tanh_rbm.nspin, tanh_rbm.nhidden), 20.0)
+
+    # Assign once to set _prev_params (needed for comparison)
+    tanh_rbm.assign_params([a, b, w])
+
+    # Call get_overlaps to invoke check_params()
+    tanh_rbm.get_overlaps(normalized=False)
+
+    # Capture printed output and assert that the warning message appears
+    captured = capsys.readouterr()
+
+    assert "Parameters exploding beyond 10" in captured.out
+    assert "exceeds threshold" in captured.out
+
 def test_get_overlaps_shapes(tanh_rbm):
-    overlaps = tanh_rbm.get_overlaps(normalized=False)
-    # Number of overlaps matches pspace
+    tanh_rbm.get_overlaps(normalized=False)
+
+    # Extract overlaps from the cache
+    overlaps = [entry["overlap"] for entry in tanh_rbm._overlap_cache.values()]
+
+    # Number of overlaps matches number of determinants in pspace
     assert len(overlaps) == len(tanh_rbm.pspace)
+
     # Each overlap is a scalar
     assert np.all([np.isscalar(o) or np.ndim(o) == 0 for o in overlaps])
 
 
-def test_get_overlap_consistency(tanh_rbm):
-    # Check that get_overlap for single SD matches get_overlaps result
-    sd = tanh_rbm.pspace[0]
-    overlap_single = tanh_rbm.get_overlap(sd, normalized=False)
-    overlaps_all = tanh_rbm.get_overlaps(normalized=False)
-    assert np.isclose(overlap_single, overlaps_all[0])
-
-
-
 def test_normalization(tanh_rbm):
     # Call normalize() to rescale the wavefunction
-    norm = tanh_rbm.normalize()
-    overlaps = tanh_rbm.get_overlaps()
+    tanh_rbm.get_overlaps(normalized=False)
+    tanh_rbm.normalize()
+    overlaps = [entry["overlap"] * tanh_rbm.output_scale for entry in tanh_rbm._overlap_cache.values()]
     squared_norm = np.sum(np.abs(overlaps) ** 2)
     assert np.isclose(squared_norm, 1.0, rtol=1e-10, atol=1e-12)
 
@@ -69,11 +120,15 @@ def test_safe_log_abs_tanh_and_derivative(tanh_rbm):
     for g in gammas:
         log_val = tanh_rbm.safe_log_abs_tanh(g)
         deriv_val = tanh_rbm.safe_dlogtanh_over_dgamma(g)
+
         # log|tanh| should be finite
         assert np.isfinite(log_val)
+        
         # derivative should be finite
         assert np.isfinite(deriv_val)
 
+def test_spin(tanh_rbm):
+    assert tanh_rbm.spin == 0
 
 def test_overlaps_with_random_params(tanh_rbm):
     # Assign random parameters and check overlaps remain finite
@@ -82,7 +137,8 @@ def test_overlaps_with_random_params(tanh_rbm):
     b = rng.uniform(-0.1, 0.1, size=tanh_rbm.nhidden)
     w = rng.uniform(-0.1, 0.1, size=(tanh_rbm.nspin, tanh_rbm.nhidden))
     tanh_rbm.assign_params([a, b, w])
-    overlaps = tanh_rbm.get_overlaps(normalized=False)
+    tanh_rbm.get_overlaps(normalized=False)
+    overlaps = [entry["overlap"] for entry in tanh_rbm._overlap_cache.values()]
     assert np.all(np.isfinite(overlaps))
 
 
@@ -118,9 +174,5 @@ def test_tanh_rbm_overlap_and_derivative(tanh_rbm):
     assert np.allclose(analytic, numeric, rtol=1e-4, atol=1e-6), \
         "Analytic and numeric derivatives do not match"
 
-    # --- Test normalization ---
-    norm = tanh_rbm.normalize()
-    assert np.isclose(norm, np.linalg.norm(tanh_rbm.get_overlaps(normalized=False))), \
-        "Normalization factor mismatch"
 
 

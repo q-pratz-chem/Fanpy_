@@ -91,7 +91,7 @@ class tanhRBM(BaseWavefunction):
 
 
     def assign_template_params(self, hf_init=False, seed=12345):
-
+        print("\nAssigning template parameters...")
         rng = np.random.default_rng(seed)
 
         Nv = self.nspin
@@ -107,7 +107,7 @@ class tanhRBM(BaseWavefunction):
 
         a = rng.normal(0.0, sigma_a, size=(Nv,))
         b = rng.normal(0.0, sigma_b, size=(Nh,))
-        w = rng.normal(0.0, sigma_w, size=(Nv, Nh))
+        w = np.zeros((Nv, Nh)) #rng.normal(0.0, sigma_w, size=(Nv, Nh))
 
         if hf_init:
             # HF-informerd residual initialization
@@ -206,13 +206,14 @@ class tanhRBM(BaseWavefunction):
 
     def normalize(self, pspace=None):
         """Normalize the RBM wavefunction such that <Psi|Psi> = 1."""
+
         # Compute all overlaps (no derivatives)
-        self.get_overlaps(deriv=None, normalized=False)
+        # self.get_overlaps(deriv=None, normalized=False)
         # print("Raw overlaps (unnormalized): ", [self._overlap_cache[sd]['overlap'] for sd in self.pspace])
 
         if pspace is not None:
             if len(pspace) != len(self._overlap_cache):
-                raise ValueError("Provided pspace length does not match cached overlaps length.")
+                raise ValueError(f"Provided pspace length {len(pspace)} does not match cached overlaps length {len(self._overlap_cache)}.")
             # Ensure the order of overlaps matches the provided pspace
             # overlaps_dict = {sd: ov for sd, ov in zip(self.pspace, overlaps)}
             overlaps = np.array([self._overlap_cache[sd]['overlap'] for sd in pspace])            
@@ -226,8 +227,9 @@ class tanhRBM(BaseWavefunction):
 
         # store scalar scale factor applied when returning overlaps
         self.output_scale = 1.0 / norm
+        print(f"Normalized overlap values. New output_scale: {self.output_scale}")
 
-        return norm
+        # return norm
 
 
     def get_overlaps(self, deriv=None, normalized=True):
@@ -283,34 +285,40 @@ class tanhRBM(BaseWavefunction):
             # store raw overlap (unnormalized)
             self._overlap_cache[sd] = {"overlap": psi}
 
-            if compute_deriv:
-                # raw derivatives d log|psi| / d param
-                pref_a = self.safe_dlogtanh_over_dgamma(gamma)  # scalar
-                dlog_da = occ_mask * pref_a                      # (Nv,)
-                dlog_db = np.tanh(theta)                      # (Nh,)
-                dlog_dW_temp = dlog_db[:, None] * occ_mask[None, :]  # (Nh, Nv)
-                dlog_dW = dlog_dW_temp.T  # (Nv, Nh) to match params order
+            # if compute_deriv:
+            # raw derivatives d log|psi| / d param
+            pref_a = self.safe_dlogtanh_over_dgamma(gamma)  # scalar
+            dlog_da = occ_mask * pref_a                      # (Nv,)
+            dlog_db = np.tanh(theta)                      # (Nh,)
+            dlog_dW_temp = dlog_db[:, None] * occ_mask[None, :]  # (Nh, Nv)
+            dlog_dW = dlog_dW_temp.T  # (Nv, Nh) to match params order
 
-                # derivatives of psi = psi * dlog
-                dpsi_da = psi * dlog_da                       # (Nv,)
-                dpsi_db = psi * dlog_db                       # (Nh,)
-                dpsi_dW = psi * dlog_dW                       # (Nv, Nh)
-        
-                # Flatten into [a (Nv,), b (Nh,), W (Nv*Nh,) ] matching params_shape
-                derivs_flat = np.hstack([dpsi_da, dpsi_db, dpsi_dW.ravel()])
-                self._overlap_cache[sd]["derivative"] = derivs_flat
+            # derivatives of psi = psi * dlog
+            dpsi_da = psi * dlog_da                       # (Nv,)
+            dpsi_db = psi * dlog_db                       # (Nh,)
+            dpsi_dW = psi * dlog_dW                       # (Nv, Nh)
+    
+            # Flatten into [a (Nv,), b (Nh,), W (Nv*Nh,) ] matching params_shape
+            derivs_flat = np.hstack([dpsi_da, dpsi_db, dpsi_dW.ravel()])
+            self._overlap_cache[sd]["derivative"] = derivs_flat
+
+        if normalized:
+            # populating the self.output_scale via normalize() call
+            self.normalize()
 
         # After loop return requested arrays in order of sds
-        if not compute_deriv:
-            overlaps_raw = np.array([self._overlap_cache[sd]["overlap"] for sd in sds])
-            if normalized:
-                return overlaps_raw * self.output_scale
-            return overlaps_raw
-        else:
-            derivs_raw =  np.array([self._overlap_cache[sd]["derivative"] for sd in sds])
-            if normalized:
-                return derivs_raw * self.output_scale
-            return derivs_raw
+        # if not compute_deriv:
+        #     overlaps_raw = np.array([self._overlap_cache[sd]["overlap"] for sd in sds])
+        #     if normalized:
+        #         # print("Returning normalized overlaps. output_scale: ", self.output_scale)
+        #         return overlaps_raw * self.output_scale
+        #     return overlaps_raw
+        # else:
+        #     derivs_raw =  np.array([self._overlap_cache[sd]["derivative"] for sd in sds])
+        #     if normalized:
+        #         # print("Returning normalized derivatives. output_scale: ", self.output_scale)
+        #         return derivs_raw * self.output_scale
+        #     return derivs_raw
         
 
     def get_overlap(self, sd, deriv=None, normalized=True):
@@ -332,11 +340,17 @@ class tanhRBM(BaseWavefunction):
         if deriv is None:
             # Return the cached raw overlap, scaled if requested
             raw = self._overlap_cache[sd]["overlap"]
-            return raw * self.output_scale if normalized else raw
+            if normalized:
+                # print("Returning normalized overlap for single sd. output_scale: ", self.output_scale)
+                return raw * self.output_scale
+            return raw 
         else:
             # Return the cached raw derivatives for the specified indices, scaled if requested
             raw_deriv = self._overlap_cache[sd]["derivative"][deriv]
-            return raw_deriv * self.output_scale if normalized else raw_deriv
+            if normalized:
+                # print("Returning normalized derivative for single sd. output_scale: ", self.output_scale)
+                return raw_deriv * self.output_scale
+            return raw_deriv
 
         
       
