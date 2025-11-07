@@ -332,34 +332,37 @@ def adam(objective, lr=0.001, betas=(0.9,0.99), max_iter=1000, **kwargs):
     def loss_fn():
         # Convert params to numpy and evaluate Fanpy objective
         params_np = params.detach().cpu().numpy() if isinstance(params, torch.Tensor) else np.array(params)
-        # if hasattr(objective.wfn, "normalize"):
-        #     objective.wfn.normalize(objective.pspace_l)
-        return objective.objective(params_np) #, normalize=True) #, assign=True)
+        return objective.objective(params_np) #, assign=True)
     
     print('###\nPerforming Adam optimization with lr = {}, betas = {}, max_iter = {}'.format(lr, betas, max_iter))
     print(f'Scheduler: Reducing LR every {scheduler.step_size} steps by {(1-scheduler.gamma)*100}%')
     print('Initial parameters: {}'.format(params.detach().numpy()))
-    print('Initial loss: {}'.format(loss_fn()))
-    print('###')
+    
 
     for i in range(max_iter):
         optimizer.zero_grad()
 
         # Compute the loss
+        # Updated parameters get assigned inside objective.objective() function inside the loss function
         loss_value = loss_fn()
 
-        # Normalize the wavefunction before computing gradients
-        if hasattr(objective.wfn, "normalize"):
-            # print("objective.pspace_n: ", objective.pspace_n)
-            objective.wfn.normalize(objective.pspace_n)
+        if i == 0:
+            print('Initial loss: {}'.format(loss_fn()))
+            print('###')
 
-        grad_np = objective.gradient(params.detach().numpy())
+        # Normalize the wavefunction before computing gradients
+        # if hasattr(objective.wfn, "normalize"):
+            # print("objective.pspace_n: ", objective.pspace_n)
+            # objective.wfn.normalize(objective.pspace_n)
+
+        grad_np = objective.gradient(params.detach().numpy(), normalize=False, assign=False)
+        
         # Gradient clipping
         grad_norm = np.linalg.norm(grad_np)
         print(f"Iteration {i}, Loss = {loss_value}, Grad norm = {grad_norm}")
-        if grad_norm > max_grad_norm:
-            grad_np = grad_np * (max_grad_norm / grad_norm)
-            print("Clipped gradient norm from {} to {}".format(grad_norm, max_grad_norm))
+        # if grad_norm > max_grad_norm:
+        #     grad_np = grad_np * (max_grad_norm / grad_norm)
+        #     print("Clipped gradient norm from {} to {}".format(grad_norm, max_grad_norm))
 
         params.grad = torch.from_numpy(grad_np).to(params.device, dtype=torch.float64)
 
@@ -375,6 +378,7 @@ def adam(objective, lr=0.001, betas=(0.9,0.99), max_iter=1000, **kwargs):
                 print(f"Iteration {i}, Loss = {loss_value}")
                 print(f"Converged at iteration {i}, ΔE={delta_E}, ||grad||={grad_norm}")
                 print(f'Final parameters: {params.detach().numpy()}')
+                success_status = True
                 break
         prev_energy = loss_value
 
@@ -388,10 +392,6 @@ def adam(objective, lr=0.001, betas=(0.9,0.99), max_iter=1000, **kwargs):
             # print(f"Iteration {i}, Learning Rate: {current_lr}")
 
 
-        # Update Fanpy parameters   
-        # print(f"Updated parameters: {params.detach().numpy()}")
-        objective.wfn.assign_params(params.detach().numpy())
-
         # Renormalize the wavefunction after updating parameters
         # if hasattr(objective.wfn, "normalize"):
         #     objective.wfn.normalize(objective.pspace_n)
@@ -400,9 +400,9 @@ def adam(objective, lr=0.001, betas=(0.9,0.99), max_iter=1000, **kwargs):
         #     print(f"Iteration {i}, Loss = {loss_value}")
 
     output = {
-        "success": True,
+        "success": success_status if 'success_status' in locals() else False,
         "params": params.detach().numpy(),
-        "energy": loss_fn(),
+        "energy": loss_value,
         "message": "Optimization completed with Adam.",
         "internal": None,
     }
