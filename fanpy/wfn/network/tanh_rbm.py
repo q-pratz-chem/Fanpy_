@@ -60,9 +60,11 @@ class tanhRBM(BaseWavefunction):
         np.random.seed(seed)
         # os.environ["PYTHONHASHSEED"] = str(seed)
 
+
     @property
     def params(self):
         return np.hstack([i.flat for i in self._params])
+    
 
     @property
     def nparams(self):
@@ -77,14 +79,18 @@ class tanhRBM(BaseWavefunction):
         # weights matrix of size nhidden x nspin
         return [((self.nspin,) * self.orders)] + [(self.nhidden,)] + [(self.nspin, self.nhidden)]
 
+
     @property
     def template_params(self):
         return self._template_params
 
+
     @property
     def pspace(self):
-        return sd_list.sd_list(self.nelec, self.nspin, num_limit=None, spin=0) #spin=0 : spin restricted sds
-    
+        #return sd_list.sd_list(self.nelec, self.nspin, num_limit=None, spin=0) #spin=0 : spin restricted sds
+        return sd_list.sd_list(self.nelec, self.nspin, exc_orders=[1,2], num_limit=None)#, spin=0) #exc_orders=[1,2] : singles and doubles excitations only
+        
+
     @property
     def spin(self):
         return 0
@@ -98,16 +104,16 @@ class tanhRBM(BaseWavefunction):
         Nh = self.nhidden
         # base scale depends on visible size (helps keep sums small)
         scale = 1.0 / max(1.0, np.sqrt(Nv))
-        
 
         # Option A: small random initialization (recommended default)
-        sigma_w = 0.005 * scale                 # weight stddev
         sigma_a = 1e-4                          # visible bias scale
         sigma_b = 1e-4                          # hidden bias scale
+        sigma_w = 0.005 * scale                 # weight stddev
 
         a = rng.normal(0.0, sigma_a, size=(Nv,))
-        b = rng.normal(0.0, sigma_b, size=(Nh,))
-        w = np.zeros((Nv, Nh)) #rng.normal(0.0, sigma_w, size=(Nv, Nh))
+        # b = rng.normal(0.0, sigma_b, size=(Nh,))
+        b =  rng.normal(0.0, sigma_b, size=(Nh,)) # np.zeros((Nh,)) 
+        w =  rng.normal(0.0, sigma_w, size=(Nv, Nh)) # np.zeros((Nv, Nh))
 
         if hf_init:
             # HF-informerd residual initialization
@@ -123,6 +129,7 @@ class tanhRBM(BaseWavefunction):
             a = 1e-2 * hf_mask      # very small HF bias; tweak 0.01-0.2 as needed
         else:
             b = rng.normal(0.0, sigma_b, size=(Nh,))
+            
         # Store templated params
         self._template_params = [a, b, w]
 
@@ -149,8 +156,8 @@ class tanhRBM(BaseWavefunction):
             # print(f"\n\tIteration {self.iter_count}: max parameter change = {delta}, max parameter value = {max_val}")
 
             # warn if exploding
-            if max_val > 10:
-                print(f"⚠️ Parameters exploding beyond 10 at iteration {self.iter_count}!")
+            # if max_val > 10:
+            #     print(f"⚠️ Parameters exploding beyond 10 at iteration {self.iter_count}!")
 
         self._prev_params = params.copy()
         self.iter_count += 1
@@ -163,6 +170,10 @@ class tanhRBM(BaseWavefunction):
 
         # store parameters
         self._params = params
+
+        # Cache the overlaps with new parameters and normalize
+        self.get_overlaps(normalized=True)
+
 
     def log2cosh(self, t):
         """Stable evaluation of log(2*cosh(t)) elementwise."""
@@ -205,31 +216,42 @@ class tanhRBM(BaseWavefunction):
     
 
     def normalize(self, pspace=None):
-        """Normalize the RBM wavefunction such that <Psi|Psi> = 1."""
+        """Normalize the RBM wavefunction such that <Psi|Psi> = 1.
 
-        # Compute all overlaps (no derivatives)
-        # self.get_overlaps(deriv=None, normalized=False)
-        # print("Raw overlaps (unnormalized): ", [self._overlap_cache[sd]['overlap'] for sd in self.pspace])
+        Since get_overlaps(normalized=True) already computes and sets
+        self.output_scale via a stable log-sum-exp normalization, this
+        method only recomputes the normalization if it has not yet been done.
+        """
+        # If normalization already performed (typical after get_overlaps)
+        if self.output_scale != 1.0 and not np.isnan(self.output_scale):
+            # Optionally check consistency if pspace provided
+            if pspace is not None:
+                # Check cached overlaps exist
+                missing = [sd for sd in pspace if sd not in self._overlap_cache]
+                if missing:
+                    print(f"Warning: normalize() called with pspace containing uncached SDs ({len(missing)} missing).")
+            
+            # Nothing to do; already normalized
+            if all(abs(v["overlap"]) == 0 for v in self._overlap_cache.values()):
+                raise ValueError("Wavefunction has zero norm; cannot normalize.")
+            return
 
-        if pspace is not None:
-            if len(pspace) != len(self._overlap_cache):
-                raise ValueError(f"Provided pspace length {len(pspace)} does not match cached overlaps length {len(self._overlap_cache)}.")
-            # Ensure the order of overlaps matches the provided pspace
-            # overlaps_dict = {sd: ov for sd, ov in zip(self.pspace, overlaps)}
-            overlaps = np.array([self._overlap_cache[sd]['overlap'] for sd in pspace])            
-        else:
-            overlaps = np.array([self._overlap_cache[sd]['overlap'] for sd in self.pspace])
-        # Compute norm = sqrt(sum |overlap|^2)
+        # Otherwise, compute fresh normalization using cached overlaps (fallback path)
+        if pspace is None:
+            pspace = self.pspace
+        
+        overlaps = np.array([self._overlap_cache[sd]['overlap'] for sd in pspace if sd in self._overlap_cache])
+        
+        if overlaps.size == 0:
+            raise ValueError("No cached overlaps to normalize from. Call get_overlaps(normalized=True) first.")
         norm = np.sqrt(np.sum(np.abs(overlaps) ** 2))
-
+        
         if norm == 0.0:
             raise ValueError("Wavefunction has zero norm; cannot normalize.")
-
-        # store scalar scale factor applied when returning overlaps
+        
         self.output_scale = 1.0 / norm
-        print(f"Normalized overlap values. New output_scale: {self.output_scale}")
-
-        # return norm
+        # Optional debug print
+        # print(f"[normalize] Recomputed normalization. output_scale={self.output_scale}")
 
 
     def get_overlaps(self, deriv=None, normalized=True):
@@ -247,8 +269,8 @@ class tanhRBM(BaseWavefunction):
 
         def check_params(a, b, w, threshold=10.0):
             max_val = max(np.max(np.abs(a)), np.max(np.abs(b)), np.max(np.abs(w)))
-            if max_val > threshold:
-                print(f"Warning: parameter magnitude {max_val} exceeds threshold {threshold}")
+            # if max_val > threshold:
+                # print(f"Warning: parameter magnitude {max_val} exceeds threshold {threshold}")
         
         check_params(a, b, w)
 
@@ -259,11 +281,30 @@ class tanhRBM(BaseWavefunction):
         # We'll populate cache entries for all sds requested (or all if deriv requested)
         compute_deriv = deriv is not None
 
-        for sd in sds:
+        # Prepare arrays to hold logabs_psi, sign, and dlog components for each sd
+        n_sds = len(sds)
+        logabs_arr = np.empty(n_sds, dtype=np.float64)
+        sign_arr = np.empty(n_sds, dtype=np.float64)
+        # We'll store dlog arrays in lists (shapes: (Nv,), (Nh,), (Nv,Nh)) per sd
+        dlog_a_list = [None] * n_sds
+        dlog_b_list = [None] * n_sds
+        dlog_w_list = [None] * n_sds
+
+        for idx, sd in enumerate(sds):
             # If cached and we have what we need, skip
-            if sd in self._overlap_cache:
-                if (not compute_deriv) or ("derivative" in self._overlap_cache[sd]):
-                    continue
+            # if sd in self._overlap_cache:
+            #     if (not compute_deriv) or ("derivative" in self._overlap_cache[sd]):
+            #         continue
+            # if sd in self._overlap_cache and (not compute_deriv or "derivative" in self._overlap_cache[sd]):
+            #     # Reuse existing derivative info if available
+            #     derivs_flat = self._overlap_cache[sd].get("derivative", None)
+            #     if derivs_flat is not None:
+            #         # Unpack to shapes (Nv,), (Nh,), (Nv,Nh)
+            #         Nv, Nh = self.nspin, self.nhidden
+            #         dlog_a_list[idx] = derivs_flat[:Nv]
+            #         dlog_b_list[idx] = derivs_flat[Nv:Nv+Nh]
+            #         dlog_w_list[idx] = derivs_flat[Nv+Nh:].reshape(Nv, Nh)
+            #         continue 
 
             # build occupation vector x in {-1, +1} (our convention)
             occ_mask = np.ones(self.nspin, dtype=np.float64) * -1.0
@@ -280,10 +321,14 @@ class tanhRBM(BaseWavefunction):
             logabs_psi = logabs_tanh + log_sum_coshs
 
             sign_gamma = np.sign(np.tanh(gamma)) if gamma != 0.0 else 1e-300
-            psi = sign_gamma * np.exp(logabs_psi)
+            # psi = sign_gamma * np.exp(logabs_psi)
+
+            # store
+            logabs_arr[idx] = logabs_psi  # for normalization later
+            sign_arr[idx] = sign_gamma
 
             # store raw overlap (unnormalized)
-            self._overlap_cache[sd] = {"overlap": psi}
+            # self._overlap_cache[sd] = {"overlap": psi}
 
             # if compute_deriv:
             # raw derivatives d log|psi| / d param
@@ -294,17 +339,49 @@ class tanhRBM(BaseWavefunction):
             dlog_dW = dlog_dW_temp.T  # (Nv, Nh) to match params order
 
             # derivatives of psi = psi * dlog
-            dpsi_da = psi * dlog_da                       # (Nv,)
-            dpsi_db = psi * dlog_db                       # (Nh,)
-            dpsi_dW = psi * dlog_dW                       # (Nv, Nh)
+            dlog_a_list[idx] = dlog_da                       # (Nv,)
+            dlog_b_list[idx] = dlog_db                       # (Nh,)
+            dlog_w_list[idx] = dlog_dW                       # (Nv, Nh)
     
             # Flatten into [a (Nv,), b (Nh,), W (Nv*Nh,) ] matching params_shape
-            derivs_flat = np.hstack([dpsi_da, dpsi_db, dpsi_dW.ravel()])
-            self._overlap_cache[sd]["derivative"] = derivs_flat
+            # derivs_flat = np.hstack([dpsi_da, dpsi_db, dpsi_dW.ravel()])
+            # self._overlap_cache[sd]["derivative"] = derivs_flat
 
-        if normalized:
+        # Prevent overflow using log-sum-exp trick for normalization
+        global L_max 
+        L_max = max(logabs_arr)
+        exp_shifted = np.exp(logabs_arr - L_max)
+        s_arr = sign_arr * exp_shifted # scaled overlaps with signs
+
+        # Norm of scaled overlaps
+        norm = np.sqrt(np.sum(s_arr ** 2))
+        if norm == 0.0:
+            raise ValueError("Wavefunction has zero norm after stablization; check parameters.")
+        
+        # Choose output_scale so that get_overlap() returns normalized psi;
+        # stored_overlap = s_i, output_scale = 1/norm => stored_overlap * output_scale = psi_i / norm
+        self.output_scale = 1.0 / norm
+
+        # Now fil the cache with scaled overlaps and scaled derivatives
+        for idx, sd in enumerate(sds):
+            s_i = s_arr[idx]
+            # scaled derivatives: (s_i * dlog) - these are safe sized, not involving exp(L)
+            dlog_a = dlog_a_list[idx]
+            dlog_b = dlog_b_list[idx]
+            dlog_w = dlog_w_list[idx]
+
+            dpsi_da_scaled = s_i * dlog_a
+            dpsi_db_scaled = s_i * dlog_b
+            dpsi_dW_scaled = s_i * dlog_w
+
+            derivs_flat_scaled = np.hstack([dpsi_da_scaled, dpsi_db_scaled, dpsi_dW_scaled.ravel()])
+
+            # cache scaled raw overlaps + scaled raw derivatives
+            self._overlap_cache[sd] = {"overlap": s_i, "derivative": derivs_flat_scaled}
+        
+        # if normalized:
             # populating the self.output_scale via normalize() call
-            self.normalize()
+            # self.normalize()
 
         # After loop return requested arrays in order of sds
         # if not compute_deriv:
@@ -329,6 +406,7 @@ class tanhRBM(BaseWavefunction):
         - if only the raw overlap is in cache and derivatives are requested, this
             will call get_overlaps(..., normalized=False) to populate raw derivatives.
         """
+        sd = int(sd)
         need_deriv = deriv is not None
         
         # If sd missing entirely OR derivatives are requested but not cached, compute them
@@ -336,6 +414,16 @@ class tanhRBM(BaseWavefunction):
             # Request raw cache population. Pass normalized=False to avoid circular calls to normalize().
             self.get_overlaps(deriv=None if deriv is None else list(range(self.nparams)))
 
+        ground = slater.ground(self.nelec, self.nspin)
+        # print("Ground:", ground, slater.occ_indices(ground))
+        if sd not in self._overlap_cache:
+            # print("Missing SD:", sd)
+            # print("Occupied orbitals:", slater.occ_indices(sd))
+            # print("Max excitation order in pspace:", slater.diff_orbs(sd, ground))
+            # raise ValueError(f"Requested SD {sd} not found in wavefunction pspace.")
+            self._overlap_cache[sd] = {"overlap": 0.0, "derivative": np.zeros(self.nparams)}
+            return 0.0
+        
         # Now the cache must contain requested entries
         if deriv is None:
             # Return the cached raw overlap, scaled if requested
@@ -343,14 +431,14 @@ class tanhRBM(BaseWavefunction):
             if normalized:
                 # print("Returning normalized overlap for single sd. output_scale: ", self.output_scale)
                 return raw * self.output_scale
-            return raw 
+            return raw * np.exp(L_max)
         else:
             # Return the cached raw derivatives for the specified indices, scaled if requested
             raw_deriv = self._overlap_cache[sd]["derivative"][deriv]
             if normalized:
                 # print("Returning normalized derivative for single sd. output_scale: ", self.output_scale)
                 return raw_deriv * self.output_scale
-            return raw_deriv
+            return raw_deriv * np.exp(L_max)
 
         
       
