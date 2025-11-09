@@ -231,9 +231,10 @@ class tanhRBM(BaseWavefunction):
                 if missing:
                     print(f"Warning: normalize() called with pspace containing uncached SDs ({len(missing)} missing).")
             
-            # Nothing to do; already normalized
             if all(abs(v["overlap"]) == 0 for v in self._overlap_cache.values()):
                 raise ValueError("Wavefunction has zero norm; cannot normalize.")
+            
+            # Nothing to do; already normalized
             return
 
         # Otherwise, compute fresh normalization using cached overlaps (fallback path)
