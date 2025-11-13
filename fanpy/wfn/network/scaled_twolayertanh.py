@@ -45,6 +45,10 @@ class ScaledTwoLayerTanhWfn(BaseWavefunction):
     @property
     def params(self):
         return np.hstack([p.ravel() for p in self._params])
+    
+    @property
+    def spin(self):
+        return 0 
 
     # ---------- Xavier initialization ----------
     def assign_template_params(self, seed=12345):
@@ -86,7 +90,7 @@ class ScaledTwoLayerTanhWfn(BaseWavefunction):
 
     @property
     def pspace(self):
-        return sd_list.sd_list(self.nelec, self.nspin, spin=0)
+        return sd_list.sd_list(self.nelec, self.nspin, spin=self.spin)
 
     # ---------- main overlap computation ----------
     def get_overlaps(self, deriv=None): #  normalized=True
