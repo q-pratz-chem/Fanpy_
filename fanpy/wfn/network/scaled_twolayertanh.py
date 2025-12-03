@@ -56,12 +56,18 @@ class ScaledTwoLayerTanhWfn(BaseWavefunction):
         Nv, Nh = self.nspin, self.nhidden
 
         # Xavier uniform for W1
-        limit_W1 = np.sqrt(6 / (Nv + Nh))
+        print('Weights initialized using Xavier uniform initialization. scale=1.0')
+        scale = np.sqrt(0.75)
+        limit_W1 = scale * np.sqrt(1 / (Nv + Nh))
+        limit_W2 = scale * np.sqrt(1 / (Nh + 1)) # (1 output neuron)
+
+        # # Xaiming He uniform for W1
+        # scale = 6.0
+        # limit_W1 = scale * np.sqrt(1 / (Nv))
+        # limit_W2 = scale * np.sqrt(1 / (Nh))
+
         W1 = rng.uniform(-limit_W1, limit_W1, size=(Nh, Nv))
         b = np.zeros(Nh)
-
-        # Xavier uniform for W2 (1 output neuron)
-        limit_W2 = np.sqrt(6 / (Nh + 1))
         W2 = rng.uniform(-limit_W2, limit_W2, size=(1, Nh))
         c = np.zeros(1)
 
@@ -80,7 +86,16 @@ class ScaledTwoLayerTanhWfn(BaseWavefunction):
                 params = params[n:]
             params = structured
         self._params = [np.array(p, copy=True) for p in params]
-        self._overlap_cache = {}
+        print("Assigned parameters to wavefunction. Clearing overlap cache.")
+        # self._overlap_cache = {}
+
+        self._pspace_list = self.pspace  # ordered list (same as before)
+        self._pspace_set = set(self._pspace_list)  # O(1) membership
+        # map sd -> index in arrays (used for direct indexing later)
+        self._pspace_index = {sd: idx for idx, sd in enumerate(self._pspace_list)}
+        # prepare empty arrays so integrate_sd_wfn can index without calling get_overlap
+        self._pspace_overlaps = None   # will be filled by get_overlaps()
+        self._pspace_derivs = None     # shape (n_sds, nparams)
 
     # ---------- helpers ----------
     @staticmethod
@@ -90,14 +105,17 @@ class ScaledTwoLayerTanhWfn(BaseWavefunction):
 
     @property
     def pspace(self):
-        return sd_list.sd_list(self.nelec, self.nspin, spin=self.spin)
+        #return sd_list.sd_list(self.nelec, self.nspin, spin=self.spin)
+        return sd_list.sd_list(self.nelec, self.nspin, exc_orders=[1,2], spin=self.spin)
 
     # ---------- main overlap computation ----------
     def get_overlaps(self, deriv=None): #  normalized=True
+        import time
+        time0 = time.time()
         W1, b, W2, c = self._params
         Nv, Nh = self.nspin, self.nhidden
 
-        sds = self.pspace
+        sds = self._pspace_list
         n_sds = len(sds)
         overlaps = np.empty(n_sds)
         derivs = np.empty((n_sds, self.nparams))
@@ -129,18 +147,52 @@ class ScaledTwoLayerTanhWfn(BaseWavefunction):
                 dpsi_dW2.ravel(),
                 dpsi_dc,
             ])
-
-            self._overlap_cache[sd] = {"overlap": psi, "derivative": derivs[idx]}
-
+            
+            # self._overlap_cache[sd] = {"overlap": psi, "derivative": derivs[idx]}
+        
+        self._pspace_overlaps = overlaps
+        self._pspace_derivs = derivs
         norm = np.sqrt(np.sum(overlaps**2))
         self.output_scale = 1.0 / (norm if norm > 1e-12 else 1.0)
+        print("[Timer] get_overlaps took {:.3f} seconds.".format(time.time() - time0))
 
 
     def get_overlap(self, sd, deriv=None, normalized=True):
-        if sd not in self._overlap_cache:
+        """Compute overlap of given Slater determinant with the wavefunction.
+        
+        sd in set is constant-time and dictionary lookup is constant-time,
+        so the thousands of lookups in integrate_sd_wfn become extremely cheap.
+        """
+
+        # Fast membership test
+        if sd not in self._pspace_set:
+            if deriv is None:
+                return 0.0
+            else:
+                return np.zeros(self.nparams)
+        # If cache arrays filled, use them
+        idx = self._pspace_index[sd]
+        if self._pspace_overlaps is None:
+            # compute and fill arrays
             self.get_overlaps()
-        raw = self._overlap_cache[sd]["overlap"]
+        raw = self._pspace_overlaps[idx]
         if deriv is None:
             return raw * self.output_scale if normalized else raw
-        raw_deriv = self._overlap_cache[sd]["derivative"][deriv]
-        return raw_deriv * self.output_scale if normalized else raw_deriv
+        return self._pspace_derivs[idx, deriv] * self.output_scale if normalized else self._pspace_derivs[idx, deriv]
+
+        # if sd not in self.pspace:
+        #     # raise ValueError(f"SD {sd} not in the parameter space.")
+        #     if deriv is None:
+        #         return 0.0
+        #     else:   
+        #         return np.zeros(self.nparams)
+               
+        # if sd not in self._overlap_cache:
+        #     print("Calculating overlaps for cache...")
+        #     self.get_overlaps()
+        
+        # raw = self._overlap_cache[sd]["overlap"]
+        # if deriv is None:
+        #     return raw * self.output_scale if normalized else raw
+        # raw_deriv = self._overlap_cache[sd]["derivative"][deriv]
+        # return raw_deriv * self.output_scale if normalized else raw_deriv
