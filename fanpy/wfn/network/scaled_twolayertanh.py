@@ -163,13 +163,13 @@ class ScaledTwoLayerTanhWfn(BaseWavefunction):
         sd in set is constant-time and dictionary lookup is constant-time,
         so the thousands of lookups in integrate_sd_wfn become extremely cheap.
         """
-
         # Fast membership test
         if sd not in self._pspace_set:
             if deriv is None:
                 return 0.0
             else:
-                return np.zeros(self.nparams)
+                return np.zeros(len(deriv))
+            
         # If cache arrays filled, use them
         idx = self._pspace_index[sd]
         if self._pspace_overlaps is None:
