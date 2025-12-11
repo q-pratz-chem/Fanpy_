@@ -307,6 +307,7 @@ class EnergyOneSideProjection(BaseSchrodinger):
             Derivative of the energy with respect to the reference.
 
         """
+        # print("calling gradient")
         params = np.array(params)
         # Assign params
         if assign:
