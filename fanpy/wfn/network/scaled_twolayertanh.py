@@ -17,10 +17,81 @@ class ScaledTwoLayerTanhWfn(BaseWavefunction):
         z = W2 h + c
         Ψ(x) = tanh(z) / tanh(1)
 
-    Xavier-initialized parameters.
+    where x is the occupation vector of a Slater determinant encoded in
+    {-1, +1}. No bias parameters are used. The output is normalized over the 
+    pspace of determinants.
+
+    The parameter ``num_layers`` counts the total number of layers
+    excluding the input layer and including the output layer.
+
+    Attributes
+    ----------
+    X : np.ndarray
+        Matrix of occupation vectors for all Slater determinants in the P-space,
+        encoded in {-1, +1}. Shape (n_sds, nspin).
+    output_scale : float
+        Normalization factor applied to the wavefunction amplitudes.
+
+    Properties
+    ----------
+    nparams : int
+        Total number of variational parameters (weights).
+    params_shape : list of tuple of int
+        Shapes of the individual weight matrices for each layer.
+    spin : int
+        Spin of the wavefunction.
+    pspace : list of int
+        List of Slater determinants included in the P-space.
+
+
+
+    Methods
+    -------
+    __init__(self, nelec, nspin, nhidden, num_layers, scale=1.0,
+             pspace_exc_orders=None, params=None, memory=None)
+        Initialize the neural network wavefunction.
+    assign_template_params(self, seed=12345)
+        Construct default Xavier-initialized weights.
+    assign_params(self, params=None)
+        Assign and structure the wavefunction parameters.
+    get_overlaps(self, deriv=True)
+        Compute overlaps of all P-space Slater determinants with the
+        wavefunction and optionally their derivatives.
+    get_overlap(self, sd, deriv=None, normalized=True)
+        Compute the overlap of a single Slater determinant with the
+        wavefunction.
     """
 
-    def __init__(self, nelec, nspin, nhidden, scale=1.0, pspace_exc_orders=None, hf_init=False, hf_mo_coeff=None, params=None, memory=None):
+    def __init__(
+        self, 
+        nelec, 
+        nspin, 
+        nhidden, 
+        scale=1.0, 
+        pspace_exc_orders=None, 
+        hf_init=False, 
+        hf_mo_coeff=None, 
+        params=None, 
+        memory=None
+    ):
+        """
+        Parameters
+        ----------
+        nelec : int
+            Number of electrons.
+        nspin : int
+            Number of spin orbitals (alpha + beta).
+        params : np.ndarray
+            Flattened array of neural network weights.
+        memory : float
+            Memory available for the wavefunction.
+        nhidden : int
+            Number of hidden units in each hidden layer.
+        init_scale : float
+            Scaling factor used in Xavier initialization of the weights.
+        pspace_exc_orders : tuple of int or None
+            Allowed excitation orders defining the P-space of Slater determinants.
+        """        
         super().__init__(nelec, nspin, memory=memory)
         self.nhidden = nhidden
         self.init_scale = scale
@@ -100,6 +171,7 @@ class ScaledTwoLayerTanhWfn(BaseWavefunction):
         
         #rng = np.random.default_rng(seed)
         Nv, Nh = self.nspin, self.nhidden
+        print(f"\nBuilding wavefunction space with excitation orders = {self.pspace_exc_orders}")
         print(f"Number of hidden units = {int(self.nhidden/self.nspin)}.nspin = {self.nhidden}")
         
         # Xavier uniform for W1
