@@ -20,7 +20,7 @@ class ScaledTwoLayerTanhWfn(BaseWavefunction):
     Xavier-initialized parameters.
     """
 
-    def __init__(self, nelec, nspin, nhidden, scale=6.0, pspace_exc_orders=None, hf_init=False, hf_mo_coeff=None, params=None, memory=None):
+    def __init__(self, nelec, nspin, nhidden, scale=1.0, pspace_exc_orders=None, hf_init=False, hf_mo_coeff=None, params=None, memory=None):
         super().__init__(nelec, nspin, memory=memory)
         self.nhidden = nhidden
         self.init_scale = scale
@@ -100,9 +100,9 @@ class ScaledTwoLayerTanhWfn(BaseWavefunction):
         
         #rng = np.random.default_rng(seed)
         Nv, Nh = self.nspin, self.nhidden
-
-        # Xavier uniform for W1
+        print(f"Number of hidden units = {int(self.nhidden/self.nspin)}.nspin = {self.nhidden}")
         
+        # Xavier uniform for W1
         print(f"\nWeights initalized using Xavier uniform initialization. scale = {self.init_scale}")
         limit_W1 = np.sqrt(self.init_scale / (Nv + Nh))
         W1 = rng.uniform(-limit_W1, limit_W1, size=(Nh, Nv))
@@ -289,4 +289,4 @@ class ScaledTwoLayerTanhWfn(BaseWavefunction):
             return float(raw * self.output_scale) if normalized else float(raw)
 
         raw_deriv = self._pspace_derivs[idx, deriv]
-        return (raw_deriv * self.output_scale) if normalized else raw_deriv 
+        return (raw_deriv * self.output_scale) if normalized else raw_deriv
