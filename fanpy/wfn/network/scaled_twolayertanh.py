@@ -170,7 +170,7 @@ class ScaledTwoLayerTanhWfn(BaseWavefunction):
         
         Nv, Nh = self.nspin, self.nhidden
         print(f"\nBuilding wavefunction space with excitation orders = {self.pspace_exc_orders}")
-        print(f"Number of hidden units = {int(self.nhidden/self.nspin)}.nspin = {self.nhidden}")
+        print(f"Number of hidden units = {(self.nhidden/self.nspin)} . nspin = {self.nhidden}")
         
         # Xavier uniform for W1
         print(f"\nWeights initalized using Xavier uniform initialization. scale = {self.init_scale}")
