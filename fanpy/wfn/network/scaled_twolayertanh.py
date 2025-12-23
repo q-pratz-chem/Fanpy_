@@ -6,7 +6,7 @@
 import numpy as np
 from fanpy.tools import slater, sd_list
 from fanpy.wfn.base import BaseWavefunction
-import torch
+
 
 
 class ScaledTwoLayerTanhWfn(BaseWavefunction):
@@ -142,7 +142,6 @@ class ScaledTwoLayerTanhWfn(BaseWavefunction):
     
     @property
     def pspace(self):
-       # return sd_list.sd_list(self.nelec, self.nspin, spin=self.spin)
         return sd_list.sd_list(self.nelec, self.nspin, exc_orders=self.pspace_exc_orders, spin=self.spin)
     
     # ---------- helpers ----------
@@ -169,7 +168,6 @@ class ScaledTwoLayerTanhWfn(BaseWavefunction):
     def assign_template_params(self, seed=12345):
         rng = np.random.default_rng(seed)
         
-        #rng = np.random.default_rng(seed)
         Nv, Nh = self.nspin, self.nhidden
         print(f"\nBuilding wavefunction space with excitation orders = {self.pspace_exc_orders}")
         print(f"Number of hidden units = {int(self.nhidden/self.nspin)}.nspin = {self.nhidden}")
@@ -239,13 +237,11 @@ class ScaledTwoLayerTanhWfn(BaseWavefunction):
             if self._template_params is None:
                 self.assign_template_params()
             params = self._template_params
-        
-        # numpy  -> torch conversion if needed
-        
+ 
         if isinstance(params, (list, tuple)):
             structured = [np.array(p, dtype=float) for p in params]
         else:
-            # flat numpy array -> structured torch params
+            # flat numpy array -> structured params
             params = np.array(params, dtype=float)
             structured = []
             idx = 0            
@@ -264,8 +260,8 @@ class ScaledTwoLayerTanhWfn(BaseWavefunction):
         # map sd -> index in arrays (used in direct indexing later)
         self._pspace_index = {sd: idx for idx, sd in enumerate(self._pspace_list)}
         # prepare empty arrays so integrate_sd_wfn can index without calling get_overlap
-        self._pspace_overlaps = None # will be filled by get_overlaps()
-        self._pspace_derivs = None # shape (n_sds, nparams)
+        self._pspace_overlaps = None     # will be filled by get_overlaps()
+        self._pspace_derivs = None       # shape (n_sds, nparams)
     
     
     # ---------- main overlap computation ----------
@@ -277,14 +273,13 @@ class ScaledTwoLayerTanhWfn(BaseWavefunction):
 
         # import time; time0 = time.time()
         W1, b, W2, c = self._params   # shapes: (Nh,Nv), (Nh,), (1,Nh), (1,)
-        
         n_sds = self.n_sds
         
         # ---- Forward (vectorized) ----
-        # X : (n_sdds, Nv)
+        # X : (n_sds, Nv)
         
         h = self.safe_tanh(self.X @ W1.T + b)       # (n_sds, Nh)
-        z = (h @ W2.T).reshape(-1) + c[0]              # (n_sds, )
+        z = (h @ W2.T).reshape(-1) + c[0]           # (n_sds, )
         tanh_z = self.safe_tanh(z)                  # (n_sds, )
         overlaps = tanh_z / self.tanh1
         
@@ -302,27 +297,21 @@ class ScaledTwoLayerTanhWfn(BaseWavefunction):
         dc = sech2_z                                 # (n_sds, )
 
         # dpsi/dh
-        dpsi_dh = sech2_z[:, None] * W2.flatten() # (n_sds, Nh)
+        dpsi_dh = sech2_z[:, None] * W2.flatten()    # (n_sds, Nh)
 
         # dpsi/dW1
         # (n_sds, Nh) * (n_sds, Nh) and multiply by X
         tmp = dpsi_dh * sech2_h
-        dW1 = tmp[:, :, None] * self.X[:, None, :]  # (n_sds, Nh, Nv)
-        dW1 = dW1.reshape(self.n_sds, Nh * Nv)                     # (n_sds, Nh*Nv)
+        dW1 = tmp[:, :, None] * self.X[:, None, :]   # (n_sds, Nh, Nv)
+        dW1 = dW1.reshape(self.n_sds, Nh * Nv)       # (n_sds, Nh*Nv)
 
         # dpsi/db
-        db = tmp                             # (n_sds, Nh)
+        db = tmp                                     # (n_sds, Nh)
 
         # final derivative matrix
         derivs = np.hstack([dW1, db, dW2, dc[:, None]])
         
         
-        # cache results
-        #for i, sd in enumerate(self.pspace):
-        #    self._overlap_cache[sd] = {
-        #        "overlap": overlaps[i].item(), 
-        #        "derivative": derivs[i]
-        #    }
         self._pspace_overlaps = overlaps.astype(float, copy=True)
         self._pspace_derivs = derivs.astype(float, copy=True)
         
@@ -340,7 +329,6 @@ class ScaledTwoLayerTanhWfn(BaseWavefunction):
         sd in set is constant-time and dictionary lookup is constant-time,
         so the thousands of lookups in integrate_sd_wfn become extremely cheap.
         """
-        
         # Fast membership test
         if sd not in self._pspace_set:
             if deriv is None:
@@ -362,3 +350,5 @@ class ScaledTwoLayerTanhWfn(BaseWavefunction):
 
         raw_deriv = self._pspace_derivs[idx, deriv]
         return (raw_deriv * self.output_scale) if normalized else raw_deriv
+
+
