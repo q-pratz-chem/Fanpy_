@@ -333,8 +333,11 @@ class ScaledTwoLayerTanhWfn(BaseWavefunction):
         if sd not in self._pspace_set:
             if deriv is None:
                 return 0.0
-            else:
-                return np.zeros(self.nparams)
+            # deriv is a list/array of parameter indices
+            if np.ndim(deriv) > 0:
+                return np.zeros(len(deriv))
+            # deriv is a single index
+            return 0.0
         
 
         if self._pspace_overlaps is None or self._pspace_derivs is None:
