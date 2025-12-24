@@ -71,8 +71,11 @@ class tanhRBM(BaseWavefunction):
 
         self._pspace_overlaps = None
         self._pspace_derivs = None
-        self.tanh1 = np.tanh(1.0) 
-      
+        self.tanh1 = np.tanh(1.0)
+        
+        # build determinant matrix ONCE 
+        self._build_pspace_matrix()
+        
         self.hf_init = hf_init
         self.assign_params(params=params)
 
@@ -171,7 +174,7 @@ class tanhRBM(BaseWavefunction):
         if params is None:
             if self._template_params is None:
                 self.assign_template_params()
-            params = self.template_params
+            params = self._template_params
 
         if isinstance(params, np.ndarray):
             structured = []
@@ -199,6 +202,12 @@ class tanhRBM(BaseWavefunction):
         self._prev_params = params.copy()
         self.iter_count += 1
         
+        
+        
+        self._pspace_list = self.pspace # ordered list 
+        self._pspace_set = set(self._pspace_list) # O(1) membership # map sd -> index in arrays (used in direct indexing later) 
+        self._pspace_index = {sd: idx for idx, sd in enumerate(self._pspace_list)}
+        
         # invalidate caches
         self._pspace_overlaps = None 
         self._pspace_derivs = None
@@ -210,45 +219,43 @@ class tanhRBM(BaseWavefunction):
     # Numerically stable helpers
     # ============================================================
 
-
-    def log2cosh(self, t):
+    @staticmethod
+    def log2cosh(t):
         """Stable evaluation of log(2*cosh(t)) elementwise."""
-        t = np.asarray(t, dtype=np.float64)
         at = np.abs(t)
         # at + log(1 + exp(-2|t|)) is stable for large |t|
         return at + np.log1p(np.exp(-2.0 * at))
 
-
-    def safe_log_abs_tanh(self, gamma):
+    @staticmethod
+    def safe_log_abs_tanh(gamma):
         """Return log|tanh(gamma)| in a numerically stable way (scalar gamma)."""
-        g = float(gamma)
         # For large |g|, tanh(g) -> ±1, log|tanh| -> 0
         # For small |g|, tanh(g) ~ g -> log|tanh| ~ log|g|
-        abs_g = abs(g)
-        if abs_g > 1e-6:
-            return np.log(abs(np.tanh(g)))
+        ax = abs(gamma)
+        
         # Use series / fallback to log(|g|) with tiny safety offset
-        return np.log(abs_g + 1e-300)
+        return np.where(ax > 1e-8, np.log(np.abs(np.tanh(gamma))), np.log(ax + 1e-300))
 
 
-    def safe_dlogtanh_over_dgamma(self, gamma):
+    @staticmethod
+    def safe_dlogtanh(gamma):
         """
         Compute (1 - tanh^2(gamma)) / tanh(gamma) safely for scalar gamma.
         This equals d/dgamma log|tanh(gamma)|.
         For small gamma use series expansion: tanh(g) = g - g^3/3 + ...
         (1 - tanh^2)/tanh ≈ 1/g - g/3.
         """
-        g = float(gamma)
-        tg = np.tanh(g)
-        abs_g = abs(g)
-        if abs_g > 1e-6 and tg != 0.0:
-            return (1.0 - tg * tg) / tg
-        # small gamma: use series approx
-        if abs_g < 1e-300:
-            # avoid division by zero: return large value consistent with 1/g behavior
-            return 1.0 / (g + 1e-300)
-        # series approx: 1/g - g/3
-        return 1.0 / g - g / 3.0
+        t = np.tanh(gamma)
+        return np.where(np.abs(gamma) > 1e-6, (1 - t**2) / t, 1.0 / (gamma + 1e-300))
+        # abs_g = abs(g)
+        # if abs_g > 1e-6 and tg != 0.0:
+        #     return (1.0 - tg * tg) / tg
+        # # small gamma: use series approx
+        # if abs_g < 1e-300:
+        #     # avoid division by zero: return large value consistent with 1/g behavior
+        #     return 1.0 / (g + 1e-300)
+        # # series approx: 1/g - g/3
+        # return 1.0 / g - g / 3.0
    
  
     # ============================================================
@@ -262,7 +269,7 @@ class tanhRBM(BaseWavefunction):
         If normalized=True, returned values are multiplied by self.output_scale (a scalar).
         The cache always stores raw (unnormalized) psi and raw derivatives.
         """
-        a, b, w = self._params 
+        a, b, W = self._params 
         # ---------- forward ----------
         gamma = self.X @ a                       # (n_sds,)
         theta = b + self.X @ W                   # (n_sds, Nh)
