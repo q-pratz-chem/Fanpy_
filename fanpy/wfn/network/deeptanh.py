@@ -130,16 +130,19 @@ class DeepTanhWfn(BaseWavefunction):
     @property
     def params_shape(self):
         shapes = []
-   
+        
         # hidden layers (num_layers - 1)
         if self.num_layers > 1:
             shapes.append((self.nhidden, self.nspin))  # W1
-   
+            shapes.append((self.nhidden,))             # b1
+            
             for _ in range(1, self.num_layers - 1):
                 shapes.append((self.nhidden, self.nhidden))  # W_l
-    
+                shapes.append((self.nhidden,))             # b_l
+                
         # output layer
-        shapes.append((1, self.nhidden if self.num_layers > 1 else self.nspin))
+        shapes.append((1, self.nhidden if self.num_layers > 1 else self.nspin)) # W_out
+        shapes.append((1,))    #c
 
         return shapes
 
@@ -183,27 +186,31 @@ class DeepTanhWfn(BaseWavefunction):
     # ---------- Xavier initialization ----------
     def assign_template_params(self, seed=12345):
         rng = np.random.default_rng(seed)
-       
         params = []
         fan_in = self.nspin
         
         print(f"\nBuilding wavefunction space with excitation orders = {self.pspace_exc_orders}")
         print(f"Number of hidden units = {int(self.nhidden/self.nspin)}.nspin = {self.nhidden}")
         print(f"Number of layers = {self.num_layers} = #hidden layers + 1 output layer\n")
+        print(f"len(self.pspace) = {len(self.pspace)}\n") 
         
         # hidden layers # Xavier uniform for W_l
         print(f"\nWeights initalized using Xavier uniform initialization. scale = {self.init_scale}")
         for l in range(self.num_layers -1): 
             fan_out = self.nhidden
             limit = np.sqrt(self.init_scale / (fan_in + fan_out))
+            
             W = rng.uniform(-limit, limit, size=(fan_out, fan_in))
-            params.extend([W])
+            b = np.zeros(fan_out)
+            
+            params.extend([W, b])
             fan_in = fan_out
         
         # output layer
         limit = np.sqrt(self.init_scale / (fan_in + 1))
-        W = rng.uniform(-limit, limit, size=(1, fan_in))
-        params.extend([W])
+        Wout = rng.uniform(-limit, limit, size=(1, fan_in))
+        c = np.zeros(1)
+        params.extend([Wout, c])
         
         self._template_params = params
 
@@ -214,8 +221,7 @@ class DeepTanhWfn(BaseWavefunction):
             if self._template_params is None:
                 self.assign_template_params()
             params = self._template_params
-        
-        # numpy  -> torch conversion if needed
+    
         
         if isinstance(params, (list, tuple)):
             structured = [np.array(p, dtype=float) for p in params]
@@ -251,62 +257,93 @@ class DeepTanhWfn(BaseWavefunction):
         [W1, W2, ..., W_out], flattened.
         """
         # import time; time0 = time.time()
+        
+
         params = self._params
         n_sds = self.n_sds
         
         # ---- Forward (vectorized) ----
         h = self.X  # h0 : (n_sds, Nv)
-        activations = []   # pre-activation
-     
-
+        idx = 0
+        activations = []   # h_l
+        preacts = []       # z_l
+        
         for l in range(0, self.num_layers-1):
-            W = params[l]
-            h = np.tanh(h @ W.T) 
+            W = params[idx]
+            b = params[idx + 1]
+            idx += 2
+            
+            z = h @ W.T + b
+            h = np.tanh(z) 
+            
+            preacts.append(z)
             activations.append(h)
 
         # output
-        W_out = params[-1]
-        z_out = (h @ W_out.T).ravel() 
+        W_out = params[idx]
+        c = params[idx + 1]
+        
+        z_out = (h @ W_out.T).ravel() + c[0] 
         tanh_z = np.tanh(z_out)
         overlaps = tanh_z / self.tanh1
 
 
         if not deriv:
             self._pspace_overlaps = overlaps.astype(float, copy=True)
+            # normalization / output scale
+            norm = np.linalg.norm(self._pspace_overlaps)
+            self.output_scale = 1.0 / (norm if norm > 1e-12 else 1.0)
             return
 
         # ---- Backward pass ----
+        blocks = []
         dWs = [None] * len(params)
 
         # output layer
         sech2_out = (1 - tanh_z ** 2) / self.tanh1     # (n_sds, )
-  
         dW_out = sech2_out[:, None] * h                # (n_sds, nhidden)
-        dWs[-1] = dW_out
+        dc = sech2_out[:, None]                        # (n_sds, 1)
+        
+        # dWs[-1] = dW_out
 
         delta = sech2_out[:, None] * W_out             # (n_sds, nhidden)
         
 
         # hidden layers (reverse order)  
         for l in reversed(range(self.num_layers - 1)):
-            h_l = activations[l]
-            sech2 = 1 - h_l**2
-            delta = delta * sech2
-             
             h_prev = self.X if l == 0 else activations[l-1]
+            h_l = activations[l]
+            
+            # apply activation derivative FIRST
+            delta = delta * (1.0 - h_l**2)         # ∂ψ/∂z_l
+    
+            # gradient wrt W_l
             dW = delta[:, :, None] * h_prev[:, None, :]  # (n_sds, out, in)
-            dWs[l] = dW.reshape(n_sds, -1)
+            db = delta
+            
+            blocks.insert(0, db.reshape(n_sds, -1))
+            blocks.insert(0, dW.reshape(n_sds, -1))
              
-            delta = delta @ params[l]
- 
+            # propagate backward FIRST
+            W = params[2 * l]
+            delta_ = (delta @ W)
+            
+            # # then apply acitvation derivative of previous layer
+            # sech2_prev = 1.0 - h_prev**2
+            # delta = delta_ * sech2_prev
+            
+        # append output layer derivatives
+        blocks.append(dW_out.reshape(n_sds, -1))
+        blocks.append(dc.reshape(n_sds, -1))
+        
         # flatten output grads
-        derivs = np.hstack([dW.reshape(n_sds, -1) for dW in dWs])
+        derivs = np.hstack(blocks)
 
-        # =========================
-        # Safety checks
-        # =========================
-        assert derivs.shape[1] == self.nparams, (
-            f"Derivative mismatch: got {derivs.shape[1]}, expected {self.nparams}"
+        # --------------------------------------------------
+        # Sanity check
+        # --------------------------------------------------
+        assert derivs.shape == (n_sds, self.nparams), (
+            f"Derivative mismatch: {derivs.shape[1]} vs {self.nparams}"
         )
 
         # cache results
@@ -333,7 +370,7 @@ class DeepTanhWfn(BaseWavefunction):
             if deriv is None:
                 return 0.0
             else:
-                return np.zeros(self.nparams)
+                return np.zeros(len(deriv))
         
 
         if self._pspace_overlaps is None or self._pspace_derivs is None:
