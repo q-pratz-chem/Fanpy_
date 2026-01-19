@@ -311,22 +311,22 @@ class DeepTanhWfn(BaseWavefunction):
 
         # hidden layers (reverse order)  
         for l in reversed(range(self.num_layers - 1)):
-            h_prev = self.X if l == 0 else activations[l-1]
             h_l = activations[l]
+            h_prev = self.X if l == 0 else activations[l-1]
             
             # apply activation derivative FIRST
-            delta = delta * (1.0 - h_l**2)         # ∂ψ/∂z_l
+            delta_z = delta * (1.0 - h_l**2)         # ∂ψ/∂z_l
     
             # gradient wrt W_l
-            dW = delta[:, :, None] * h_prev[:, None, :]  # (n_sds, out, in)
-            db = delta
+            dW = delta_z[:, :, None] * h_prev[:, None, :]  # (n_sds, out, in)
+            db = delta_z
             
             blocks.insert(0, db.reshape(n_sds, -1))
             blocks.insert(0, dW.reshape(n_sds, -1))
              
             # propagate backward FIRST
             W = params[2 * l]
-            delta_ = (delta @ W)
+            delta = (delta_z @ W) * (1.0 - h_prev **2)
             
             # # then apply acitvation derivative of previous layer
             # sech2_prev = 1.0 - h_prev**2
