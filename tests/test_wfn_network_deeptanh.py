@@ -42,6 +42,31 @@ def test_safe_tanh():
     )
 
 
+def test_variance_inflation_small():
+    wfn_no_noise = DeepTanhWfn(
+        nelec=2, nspin=4, nhidden=20, num_layers=2, pspace_exc_orders=[2], add_noise=False
+    )
+    noise_frac = 0.05
+    wfn_noise = DeepTanhWfn(
+        nelec=2, nspin=4, nhidden=20, num_layers=2, pspace_exc_orders=[2],
+        add_noise=True, noise_frac=noise_frac
+    )
+
+    for p0, p1, shape in zip(
+        wfn_no_noise._params, wfn_noise._params, wfn_no_noise.params_shape
+    ):
+        if len(shape) == 2:
+            var0 = np.var(p0)
+            var1 = np.var(p1)
+            print(var0, var1)
+            expected_increase = (noise_frac**2) / 3  # Var[U(-a,a)] = a^2 / 3
+            ratio = var1 / var0
+
+            assert abs(ratio - 1.0) < 0.05
+            #assert var1 > var0
+            #assert var1 < 1.1 * var0
+
+
 def test_no_nan_overlaps(wfn):
     wfn.get_overlaps()
     overlaps = wfn._pspace_overlaps

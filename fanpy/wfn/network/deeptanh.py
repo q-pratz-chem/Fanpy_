@@ -74,6 +74,8 @@ class DeepTanhWfn(BaseWavefunction):
         nhidden, 
         num_layers=2,
         scale=1.0, 
+        add_noise=False,
+        noise_frac=0.05,
         pspace_exc_orders=None, 
         params=None, 
         memory=None
@@ -105,6 +107,8 @@ class DeepTanhWfn(BaseWavefunction):
         self.num_layers = num_layers
         self.init_scale = scale
         self.output_scale = 1.0
+        self.add_noise = add_noise
+        self.noise_frac = noise_frac
         
         self.pspace_exc_orders=pspace_exc_orders
         self._template_params = None
@@ -185,9 +189,14 @@ class DeepTanhWfn(BaseWavefunction):
 
     # ---------- Xavier initialization ----------
     def assign_template_params(self, seed=12345):
+        
+        # noise_frac = x # x% of Xavier range
         rng = np.random.default_rng(seed)
         params = []
         fan_in = self.nspin
+        
+        add_noise = self.add_noise
+        noise_frac = self.noise_frac
         
         print(f"\nBuilding wavefunction space with excitation orders = {self.pspace_exc_orders}")
         print(f"Number of hidden units = {int(self.nhidden/self.nspin)}.nspin = {self.nhidden}")
@@ -201,6 +210,11 @@ class DeepTanhWfn(BaseWavefunction):
             limit = np.sqrt(self.init_scale / (fan_in + fan_out))
             
             W = rng.uniform(-limit, limit, size=(fan_out, fan_in))
+            
+            if add_noise:
+                noise_limit = noise_frac * limit
+                W += rng.uniform(-noise_limit, noise_limit, size=W.shape)
+            
             b = np.zeros(fan_out)
             
             params.extend([W, b])
@@ -209,6 +223,9 @@ class DeepTanhWfn(BaseWavefunction):
         # output layer
         limit = np.sqrt(self.init_scale / (fan_in + 1))
         Wout = rng.uniform(-limit, limit, size=(1, fan_in))
+        if add_noise:
+            noise_limit = noise_frac * limit
+            Wout += rng.uniform(-noise_limit, noise_limit, size=Wout.shape)
         c = np.zeros(1)
         params.extend([Wout, c])
         
