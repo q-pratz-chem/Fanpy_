@@ -205,6 +205,9 @@ class DeepTanhWfn(BaseWavefunction):
         
         # hidden layers # Xavier uniform for W_l
         print(f"\nWeights initalized using Xavier uniform initialization. scale = {self.init_scale}")
+        if add_noise:
+            print(f"Adding Xavier uniform noise with noise fraction of {noise_frac}.")
+        
         for l in range(self.num_layers -1): 
             fan_out = self.nhidden
             limit = np.sqrt(self.init_scale / (fan_in + fan_out))
