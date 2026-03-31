@@ -11,7 +11,7 @@ def wfn(request):
         nelec=2,
         nspin=4,
         nhidden=3,
-        num_layers=request.param,
+        num_total_layers=request.param,
         pspace_exc_orders=[2],
     )
 
@@ -44,11 +44,11 @@ def test_safe_tanh():
 
 def test_variance_inflation_small():
     wfn_no_noise = DeepTanhWfn(
-        nelec=2, nspin=4, nhidden=20, num_layers=2, pspace_exc_orders=[2], add_noise=False
+        nelec=2, nspin=4, nhidden=20, num_total_layers=2, pspace_exc_orders=[2], add_noise=False
     )
     noise_frac = 0.05
     wfn_noise = DeepTanhWfn(
-        nelec=2, nspin=4, nhidden=20, num_layers=2, pspace_exc_orders=[2],
+        nelec=2, nspin=4, nhidden=20, num_total_layers=2, pspace_exc_orders=[2],
         add_noise=True, noise_frac=noise_frac
     )
 
@@ -159,12 +159,12 @@ def test_get_overlaps_no_deriv_sets_scale_and_returns(wfn):
 def test_finite_difference_gradient(wfn):
     ground = slater.ground(wfn.nelec, wfn.nspin)
 
-    eps = 1e-6
     idx = 0  # first parameter
+    eps = 1e-6
 
     # analytic
     wfn.get_overlaps()
-    analytic = wfn.get_overlap(ground, deriv=[idx], normalized=False)[0]
+    analytic = wfn.get_overlap(ground, deriv=[idx])[0]
 
     # numeric
     flat = wfn.params.copy()
@@ -172,12 +172,12 @@ def test_finite_difference_gradient(wfn):
     flat[idx] += eps
     wfn.assign_params(flat)
     wfn.get_overlaps()
-    psi_plus = wfn.get_overlap(ground, normalized=False)
+    psi_plus = wfn.get_overlap(ground)
 
     flat[idx] -= 2 * eps
     wfn.assign_params(flat)
     wfn.get_overlaps()
-    psi_minus = wfn.get_overlap(ground, normalized=False)
+    psi_minus = wfn.get_overlap(ground)
 
     numeric = (psi_plus - psi_minus) / (2 * eps)
 
