@@ -13,6 +13,7 @@ def wfn(request):
         nhidden=3,
         num_total_layers=request.param,
         pspace_exc_orders=[2],
+        use_bias=True,
     )
 
 

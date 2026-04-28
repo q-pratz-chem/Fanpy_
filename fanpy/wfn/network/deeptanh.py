@@ -74,6 +74,7 @@ class DeepTanhWfn(BaseWavefunction):
         nhidden, 
         num_total_layers=2,
         scale=1.0, 
+        use_bias=False,
         add_noise=False,
         noise_frac=0.05,
         hf_init=False,
@@ -107,6 +108,7 @@ class DeepTanhWfn(BaseWavefunction):
         self.nhidden = nhidden
         self.num_total_layers = num_total_layers
         self.init_scale = scale
+        self.use_bias = use_bias
         self.output_scale = 1.0
         self.add_noise = add_noise
         self.noise_frac = noise_frac
@@ -173,15 +175,18 @@ class DeepTanhWfn(BaseWavefunction):
         # hidden layers (num_total_layers - 1)
         if self.num_total_layers > 1:
             shapes.append((self.nhidden, self.nspin))  # W1
-            # shapes.append((self.nhidden,))             # b1
+            if self.use_bias:
+                shapes.append((self.nhidden,))             # b1
             
             for _ in range(1, self.num_total_layers - 1):
                 shapes.append((self.nhidden, self.nhidden))  # W_l
-                # shapes.append((self.nhidden,))             # b_l
+                if self.use_bias:
+                    shapes.append((self.nhidden,))             # b_l
                 
         # output layer
         shapes.append((1, self.nhidden if self.num_total_layers > 1 else self.nspin)) # W_out
-        # shapes.append((1,))    #c
+        if self.use_bias:
+            shapes.append((1,))    #c
 
         return shapes
 
@@ -238,10 +243,11 @@ class DeepTanhWfn(BaseWavefunction):
                 noise_limit = self.noise_frac * limit
                 W += rng.uniform(-noise_limit, noise_limit, size=W.shape)
             
-            # b = np.zeros(fan_out)
+            params.append(W)
+            if self.use_bias:
+                b = np.zeros(fan_out)
+                params.append(b)
             
-            # params.extend([W, b])
-            params.extend([W])
             fan_in = fan_out
         
         # output layer
@@ -256,9 +262,11 @@ class DeepTanhWfn(BaseWavefunction):
         if self.add_noise:
             noise_limit = self.noise_frac * limit
             Wout += rng.uniform(-noise_limit, noise_limit, size=Wout.shape)
-        # c = np.zeros(1)
-        # params.extend([Wout, c])
-        params.extend([Wout])
+       
+        params.append(Wout)
+        if self.use_bias:
+            c = np.zeros(1)
+            params.append(c)
         
         self._template_params = params
 
@@ -405,37 +413,59 @@ class DeepTanhWfn(BaseWavefunction):
         params = self._params
           # h0 : (n_sds, Nv)
         
-        # ---- Forward (vectorized) ----
+        # =========================
+        # Forward pass (vectorized)
+        # =========================
         activations = [self.X]   # h_l
         # preacts = []       # z_l
-
         h = self.X
+
+        layer_info = [] # store param indices
         idx = 0
 
         # hidden layers
         for _ in range(0, self.num_total_layers-1):
+            W_idx = idx
             W = params[idx]
-            # b = params[idx + 1]
-            # idx += 2
             idx += 1
-            
             z = h @ W.T 
-            # z += b
+
+            if self.use_bias:
+                b_idx = idx
+                b = params[idx]
+                idx += 1
+                z += b
+                
             h = np.tanh(z) 
             
             # preacts.append(z)
             activations.append(h)
+            layer_dict = {"W_idx": W_idx}
+            
+            if self.use_bias:
+                layer_dict["b_idx"] = b_idx
+                
+            layer_info.append(layer_dict)
 
         # output layer
+        W_out_idx = idx
         W_out = params[idx]
-        # c = params[idx + 1]
-        
+        idx += 1
         z_out = (h @ W_out.T).ravel() 
-        # zout += c[0] 
+
+        if self.use_bias:
+            c_idx = idx
+            c = params[idx]
+            idx += 1
+            z_out += c[0] 
+            
         tanh_z = np.tanh(z_out)
         psi_raw = tanh_z / self.tanh1
 
 
+        # =========================
+        # If no derivatives
+        # =========================
         if not deriv:
             norm = np.linalg.norm(psi_raw)
             if norm > 1e-12:
@@ -444,25 +474,36 @@ class DeepTanhWfn(BaseWavefunction):
                 self._pspace_overlaps = psi_raw
             return
 
-        # ---- Backward pass (raw) ----
-        blocks = []
 
-        # output layer
+        # =========================
+        # Backward pass
+        # =========================
+        dparams = [None] * len(params)
+
+        # ---- output layer ----
         sech2_out = (1 - tanh_z ** 2) / self.tanh1     # (n_sds, )
+        h_L = activations[-1]
 
         # gradient wrt W_out
-        h_L = activations[-1]
-        dW_out = sech2_out[:, None] * h_L                # (n_sds, nhidden)
-        # dc = sech2_out[:, None]                        # (n_sds, 1)
+        dparams[W_out_idx] = (sech2_out[:, None] * h_L)    # (n_sds, nhidden)
         
-        # dWs[-1] = dW_out
+        if self.use_bias:
+            dparams[c_idx] = sech2_out[:, None]           # (n_sds, 1)
 
-        # initial delta (for last hidden layer)
+        # initial delta (for the last hidden layer)
         delta = sech2_out[:, None] @ W_out             # (n_sds, nhidden)
         
 
-        # hidden layers (reverse order)  
+        # ---- hidden layers (reverse order) ----
         for l in reversed(range(self.num_total_layers - 1)):
+            info = layer_info[l]
+    
+            W_idx = info["W_idx"]
+            if self.use_bias:
+                b_idx = info["b_idx"]
+    
+            W = params[W_idx]
+                
             h_l = activations[l+1]  # output for layer l
             h_prev = activations[l] # input for layer l
             
@@ -470,28 +511,24 @@ class DeepTanhWfn(BaseWavefunction):
             delta_z = delta * (1.0 - h_l**2)         # ∂ψ/∂z_l
     
             # gradient wrt W_l
-            dW = delta_z[:, :, None] * h_prev[:, None, :]  # (n_sds, out, in)
-            # db = delta_z
-            
-            # blocks.insert(0, db.reshape(n_sds, -1))
-            blocks.insert(0, dW.reshape(self.n_sds, -1))
-             
+            #dW = delta_z[:, :, None] * h_prev[:, None, :]  # (n_sds, out, in)
+            dW = np.einsum('ij,ik->ijk', delta_z, h_prev)
+            dparams[W_idx] = dW
+
+            # db
+            if self.use_bias:
+                dparams[b_idx] = delta_z
+                     
             # propagate backward FIRST
-            # W = params[2 * l]
-            W = params[l]
             delta = (delta_z @ W)
             
-            # # then apply acitvation derivative of previous layer
-            # sech2_prev = 1.0 - h_prev**2
-            # delta = delta_ * sech2_prev
-            
-        # append output layer derivatives
-        blocks.append(dW_out.reshape(self.n_sds, -1))
-        # blocks.append(dc.reshape(n_sds, -1))
         
-        # flatten output grads
-        dpsi_raw = np.hstack(blocks)
-
+        # =========================
+        # Flatten gradients
+        # =========================
+        dpsi_raw = np.hstack([
+            d.reshape(self.n_sds, -1) for d in dparams
+        ])
         # --------------------------------------------------
         # Sanity check
         # --------------------------------------------------
@@ -499,11 +536,11 @@ class DeepTanhWfn(BaseWavefunction):
             f"Derivative mismatch: {dpsi_raw.shape[1]} vs {self.nparams}"
         )
 
-        # --------------------------------------------------
+        # =========================
         # Normalization correction
-        # --------------------------------------------------
-        # normalization / output scale
+        # =========================
         norm = np.linalg.norm(psi_raw)
+        
         if norm < 1e-12:
             # fallback (avoid divide-by-zero)
             self._pspace_overlaps = psi_raw
